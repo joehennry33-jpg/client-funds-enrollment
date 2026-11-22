@@ -209,13 +209,19 @@ export function ClientPortal({ settings, onOpenAdminPortal }: ClientPortalProps)
           pin: cleanPin,
         }),
       });
-      const data = (await response.json()) as {
-        enrolmentId?: string;
-        applicationRef?: string;
-        error?: string;
-      };
+      const rawText = await response.text();
+      let data: { enrolmentId?: string; applicationRef?: string; error?: string } = {};
+      try {
+        data = rawText ? (JSON.parse(rawText) as typeof data) : {};
+      } catch {
+        data = {};
+      }
+
       if (!response.ok || !data.enrolmentId) {
-        setFormError(data.error || 'Unable to register right now. Please try again.');
+        setFormError(
+          data.error ||
+            `Registration service returned HTTP ${response.status}. Ensure the latest backend API deployment is live.`
+        );
         return;
       }
 
@@ -226,7 +232,7 @@ export function ClientPortal({ settings, onOpenAdminPortal }: ClientPortalProps)
       setFlowStep('step3_received');
       setFormError(null);
     } catch {
-      setFormError('Network error while submitting registration. Please try again.');
+      setFormError('Unable to reach the registration server. Please check your connection and try again.');
     } finally {
       setSubmitting(false);
     }
@@ -264,13 +270,19 @@ export function ClientPortal({ settings, onOpenAdminPortal }: ClientPortalProps)
           otpCode: trimmed,
         }),
       });
-      const data = (await response.json()) as {
-        verified?: boolean;
-        error?: string;
-      };
+      const rawText = await response.text();
+      let data: { verified?: boolean; error?: string } = {};
+      try {
+        data = rawText ? (JSON.parse(rawText) as typeof data) : {};
+      } catch {
+        data = {};
+      }
 
       if (!response.ok || !data.verified) {
-        setFormError(data.error || 'Verification failed. Please check the code and try again.');
+        setFormError(
+          data.error ||
+            `Verification failed (HTTP ${response.status}). Please check the code and try again.`
+        );
         return;
       }
 
@@ -279,7 +291,7 @@ export function ClientPortal({ settings, onOpenAdminPortal }: ClientPortalProps)
       setFormNotice('Phone number verified. Final submission form unlocked.');
       setFlowStep('step4_package');
     } catch {
-      setFormError('Unable to verify code right now. Please try again.');
+      setFormError('Unable to reach the verification server. Please try again.');
     } finally {
       setSubmitting(false);
     }
@@ -300,13 +312,16 @@ export function ClientPortal({ settings, onOpenAdminPortal }: ClientPortalProps)
           applicationRef: activeEnrolment.applicationRef,
         }),
       });
-      const data = (await response.json()) as {
-        ok?: boolean;
-        error?: string;
-      };
+      const rawText = await response.text();
+      let data: { ok?: boolean; error?: string } = {};
+      try {
+        data = rawText ? (JSON.parse(rawText) as typeof data) : {};
+      } catch {
+        data = {};
+      }
 
       if (!response.ok || !data.ok) {
-        setFormError(data.error || 'Could not send resend request.');
+        setFormError(data.error || `Could not send resend request (HTTP ${response.status}).`);
         return;
       }
 
@@ -316,7 +331,7 @@ export function ClientPortal({ settings, onOpenAdminPortal }: ClientPortalProps)
         'Resend notification recorded in the admin panel. A 5-minute cooldown now applies.'
       );
     } catch {
-      setFormError('Network error while notifying the admin panel. Please try again.');
+      setFormError('Unable to reach the server to notify the admin panel. Please try again.');
     } finally {
       setSubmitting(false);
     }
