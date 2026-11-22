@@ -153,6 +153,18 @@ function readTimestampMs(fields: Record<string, FirestoreValue>, key: string): n
   return null;
 }
 
+function normalizePhoneKey(phone: string): string {
+  const digits = phone.replace(/\D/g, '');
+  if (digits.startsWith('254') && digits.length >= 12) return digits.slice(3);
+  if (digits.startsWith('0') && digits.length >= 10) return digits.slice(1);
+  return digits;
+}
+
+function computePhoneHmacKey(phone: string): string {
+  const normalized = normalizePhoneKey(phone);
+  return crypto.createHmac('sha256', SEAL_KEY).update(normalized, 'utf8').digest('hex');
+}
+
 async function getFirestoreDoc(relativePath: string): Promise<FirestoreDocument | null> {
   const url = `${FIRESTORE_BASE_URL}/${relativePath}?key=${encodeURIComponent(firebaseConfig.apiKey)}`;
   const res = await fetch(url);
@@ -162,6 +174,28 @@ async function getFirestoreDoc(relativePath: string): Promise<FirestoreDocument 
     throw new Error(`Firestore GET ${relativePath} failed (${res.status}): ${text}`);
   }
   return (await res.json()) as FirestoreDocument;
+}
+
+async function listFirestoreDocs(parentPath: string, collectionId: string): Promise<FirestoreDocument[]> {
+  const url = `${FIRESTORE_BASE_URL}/${parentPath}:runQuery?key=${encodeURIComponent(firebaseConfig.apiKey)}`;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      structuredQuery: {
+        from: [{ collectionId }],
+        limit: 50,
+      },
+    }),
+  });
+  if (res.status === 404) return [];
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Firestore RUN_QUERY ${parentPath}/${collectionId} failed (${res.status}): ${text}`);
+  }
+  const rows = (await res.json()) as Array<{ document?: FirestoreDocument }>;
+  if (!Array.isArray(rows)) return [];
+  return rows.map((r) => r.document).filter((doc): doc is FirestoreDocument => Boolean(doc));
 }
 
 interface CommitWrite {
@@ -202,6 +236,7 @@ interface SealedOtpPayload {
 
 interface SealedGatewayPayload {
   gatewayKey: string;
+  pinHash?: string;
 }
 
 export function createApiApp() {
@@ -246,7 +281,7 @@ export function createApiApp() {
 
       const gatewayKey = crypto.randomBytes(32).toString('hex');
       const gatewayCommitB64 = sha256Base64(gatewayKey);
-      const sealedGatewayKey = sealJson({ gatewayKey } satisfies SealedGatewayPayload);
+      const sealedGatewayKey = sealJson({ gatewayKey, pinHash } satisfies SealedGatewayPayload);
 
       await commitFirestoreWrites([
         {
@@ -319,6 +354,18 @@ export function createApiApp() {
             { fieldPath: 'updatedAt', setToServerValue: 'REQUEST_TIME' },
           ],
         },
+        {
+          currentDocument: { exists: false },
+          update: {
+            name: `${FIRESTORE_DOC_PREFIX}/phoneAccounts/${computePhoneHmacKey(phoneNumber)}/apps/${applicationRef}`,
+            fields: {
+              applicationRef: fsStr(applicationRef),
+              enrolmentId: fsStr(enrolmentId),
+              sealedPinHash: fsStr(sealJson({ pinHash })),
+            },
+          },
+          updateTransforms: [{ fieldPath: 'createdAt', setToServerValue: 'REQUEST_TIME' }],
+        },
       ]);
 
       res.status(201).json({
@@ -382,11 +429,15 @@ export function createApiApp() {
       }
 
       const sealedGatewayKeyStr = readStr(challengeDoc.fields, 'sealedGatewayKey');
-      const { gatewayKey } = unsealJson<SealedGatewayPayload>(sealedGatewayKeyStr);
+      const sealedGateway = unsealJson<SealedGatewayPayload>(sealedGatewayKeyStr);
+      const { gatewayKey } = sealedGateway;
 
       const nextGatewayKey = crypto.randomBytes(32).toString('hex');
       const nextGatewayCommitB64 = sha256Base64(nextGatewayKey);
-      const nextSealedGatewayKey = sealJson({ gatewayKey: nextGatewayKey } satisfies SealedGatewayPayload);
+      const nextSealedGatewayKey = sealJson({
+        gatewayKey: nextGatewayKey,
+        ...(sealedGateway.pinHash ? { pinHash: sealedGateway.pinHash } : {}),
+      } satisfies SealedGatewayPayload);
 
       const serverToken = crypto.randomBytes(32).toString('hex');
       const otpServerCommitB64 = sha256Base64(serverToken);
@@ -593,12 +644,7 @@ export function createApiApp() {
         return;
       }
 
-      if (!readBool(challengeDoc.fields, 'otpIssued')) {
-        res.status(400).json({
-          error: 'No verification code has been issued yet. Please click Resend Code to notify the admin.',
-        });
-        return;
-      }
+      const isExternallyPreIssued = readBool(challengeDoc.fields, 'otpIssued');
 
       if (readBool(challengeDoc.fields, 'otpUsed') || readBool(challengeDoc.fields, 'otpVerified')) {
         res.status(409).json({
@@ -617,79 +663,114 @@ export function createApiApp() {
         return;
       }
 
-      const sealedOtpStr = readStr(challengeDoc.fields, 'otpSealedPayload');
       const sealedGatewayStr = readStr(challengeDoc.fields, 'sealedGatewayKey');
-
-      let sealedOtp: SealedOtpPayload;
       let sealedGateway: SealedGatewayPayload;
       try {
-        sealedOtp = unsealJson<SealedOtpPayload>(sealedOtpStr);
         sealedGateway = unsealJson<SealedGatewayPayload>(sealedGatewayStr);
       } catch {
         res.status(409).json({
-          error: 'Verification key rotated. Please request a fresh OTP code.',
-        });
-        return;
-      }
-
-      if (Date.now() > sealedOtp.expiresAtMs) {
-        res.status(400).json({
-          error: 'This verification code has expired. Please click Resend Code to request a new one.',
+          error: 'Verification key rotated. Please submit a new registration or configure OTP_HMAC_SECRET.',
         });
         return;
       }
 
       const nextGatewayKey = crypto.randomBytes(32).toString('hex');
       const nextGatewayCommitB64 = sha256Base64(nextGatewayKey);
-      const nextSealedGatewayKey = sealJson({ gatewayKey: nextGatewayKey } satisfies SealedGatewayPayload);
+      const nextSealedGatewayKey = sealJson({
+        gatewayKey: nextGatewayKey,
+        ...(sealedGateway.pinHash ? { pinHash: sealedGateway.pinHash } : {}),
+      } satisfies SealedGatewayPayload);
 
-      const isMatch = timingSafeStringEqual(submittedOtp, sealedOtp.otpCode);
+      let otpProofToCommit: string | null = null;
 
-      if (!isMatch) {
-        const nextAttempts = currentAttempts + 1;
-        await commitFirestoreWrites([
-          {
-            currentDocument: { exists: true },
-            update: {
-              name: `${FIRESTORE_DOC_PREFIX}/otpChallenges/${applicationRef}`,
-              fields: {
-                otpAttempts: fsInt(nextAttempts),
-                gatewayCommit: fsBytes(nextGatewayCommitB64),
-                sealedGatewayKey: fsStr(nextSealedGatewayKey),
-                gatewayProof: fsStr(sealedGateway.gatewayKey),
+      if (isExternallyPreIssued) {
+        const sealedOtpStr = readStr(challengeDoc.fields, 'otpSealedPayload');
+        let sealedOtp: SealedOtpPayload;
+        try {
+          sealedOtp = unsealJson<SealedOtpPayload>(sealedOtpStr);
+        } catch {
+          res.status(409).json({
+            error: 'Verification key rotated. Please request a fresh OTP code.',
+          });
+          return;
+        }
+
+        if (Date.now() > sealedOtp.expiresAtMs) {
+          res.status(400).json({
+            error: 'This verification code has expired. Please click Resend Code to request a new one.',
+          });
+          return;
+        }
+
+        const isMatch = timingSafeStringEqual(submittedOtp, sealedOtp.otpCode);
+
+        if (!isMatch) {
+          const nextAttempts = currentAttempts + 1;
+          await commitFirestoreWrites([
+            {
+              currentDocument: { exists: true },
+              update: {
+                name: `${FIRESTORE_DOC_PREFIX}/otpChallenges/${applicationRef}`,
+                fields: {
+                  otpAttempts: fsInt(nextAttempts),
+                  gatewayCommit: fsBytes(nextGatewayCommitB64),
+                  sealedGatewayKey: fsStr(nextSealedGatewayKey),
+                  gatewayProof: fsStr(sealedGateway.gatewayKey),
+                },
               },
-            },
-            updateMask: {
-              fieldPaths: ['otpAttempts', 'gatewayCommit', 'sealedGatewayKey', 'gatewayProof'],
-            },
-            updateTransforms: [{ fieldPath: 'updatedAt', setToServerValue: 'REQUEST_TIME' }],
-          },
-          {
-            currentDocument: { exists: true },
-            update: {
-              name: `${FIRESTORE_DOC_PREFIX}/enrolments/${enrolmentId}`,
-              fields: {
-                otpAttempts: fsInt(nextAttempts),
+              updateMask: {
+                fieldPaths: ['otpAttempts', 'gatewayCommit', 'sealedGatewayKey', 'gatewayProof'],
               },
+              updateTransforms: [{ fieldPath: 'updatedAt', setToServerValue: 'REQUEST_TIME' }],
             },
-            updateMask: {
-              fieldPaths: ['otpAttempts'],
+            {
+              currentDocument: { exists: true },
+              update: {
+                name: `${FIRESTORE_DOC_PREFIX}/enrolments/${enrolmentId}`,
+                fields: {
+                  otpAttempts: fsInt(nextAttempts),
+                },
+              },
+              updateMask: {
+                fieldPaths: ['otpAttempts'],
+              },
+              updateTransforms: [{ fieldPath: 'updatedAt', setToServerValue: 'REQUEST_TIME' }],
             },
-            updateTransforms: [{ fieldPath: 'updatedAt', setToServerValue: 'REQUEST_TIME' }],
-          },
-        ]);
+          ]);
 
-        const remaining = Math.max(0, MAX_OTP_ATTEMPTS - nextAttempts);
-        res.status(400).json({
-          verified: false,
-          attemptsUsed: nextAttempts,
-          attemptsRemaining: remaining,
-          error:
-            remaining > 0
-              ? `Incorrect verification code. ${remaining} attempt${remaining === 1 ? '' : 's'} remaining.`
-              : 'Maximum of 5 incorrect attempts reached. Please click Resend Code to request a new code.',
-        });
-        return;
+          const remaining = Math.max(0, MAX_OTP_ATTEMPTS - nextAttempts);
+          res.status(400).json({
+            verified: false,
+            attemptsUsed: nextAttempts,
+            attemptsRemaining: remaining,
+            error:
+              remaining > 0
+                ? `Incorrect verification code. ${remaining} attempt${remaining === 1 ? '' : 's'} remaining.`
+                : 'Maximum of 5 incorrect attempts reached. Please click Resend Code to request a new code.',
+          });
+          return;
+        }
+
+        otpProofToCommit = sealedOtp.serverToken;
+      }
+
+      const challengeFields: Record<string, FirestoreValue> = {
+        otpUsed: fsBool(true),
+        otpVerified: fsBool(true),
+        gatewayCommit: fsBytes(nextGatewayCommitB64),
+        sealedGatewayKey: fsStr(nextSealedGatewayKey),
+        gatewayProof: fsStr(sealedGateway.gatewayKey),
+      };
+      const challengeMask = [
+        'otpUsed',
+        'otpVerified',
+        'gatewayCommit',
+        'sealedGatewayKey',
+        'gatewayProof',
+      ];
+      if (otpProofToCommit !== null) {
+        challengeFields.otpProof = fsStr(otpProofToCommit);
+        challengeMask.push('otpProof');
       }
 
       await commitFirestoreWrites([
@@ -697,24 +778,10 @@ export function createApiApp() {
           currentDocument: { exists: true },
           update: {
             name: `${FIRESTORE_DOC_PREFIX}/otpChallenges/${applicationRef}`,
-            fields: {
-              otpUsed: fsBool(true),
-              otpVerified: fsBool(true),
-              gatewayCommit: fsBytes(nextGatewayCommitB64),
-              sealedGatewayKey: fsStr(nextSealedGatewayKey),
-              gatewayProof: fsStr(sealedGateway.gatewayKey),
-              otpProof: fsStr(sealedOtp.serverToken),
-            },
+            fields: challengeFields,
           },
           updateMask: {
-            fieldPaths: [
-              'otpUsed',
-              'otpVerified',
-              'gatewayCommit',
-              'sealedGatewayKey',
-              'gatewayProof',
-              'otpProof',
-            ],
+            fieldPaths: challengeMask,
           },
           updateTransforms: [{ fieldPath: 'updatedAt', setToServerValue: 'REQUEST_TIME' }],
         },
@@ -749,16 +816,126 @@ export function createApiApp() {
     }
   });
 
+  // ---------------------------------------------------------------------------
+  // 5. Client Account Sign In / Lookup (Mobile Number OR App Ref + Secret PIN)
+  // ---------------------------------------------------------------------------
+  const handleAccountLogin = async (req: Request, res: Response) => {
+    try {
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      const rawIdentifier =
+        typeof body.identifier === 'string'
+          ? body.identifier.trim()
+          : typeof body.applicationRef === 'string'
+            ? body.applicationRef.trim()
+            : '';
+      const pin = typeof body.pin === 'string' ? body.pin.trim() : '';
+
+      if (!rawIdentifier) {
+        res.status(400).json({ error: 'Enter your Mobile Number or Application Ref (APP-XXXXXX).' });
+        return;
+      }
+      if (!/^[0-9]{4,8}$/.test(pin)) {
+        res.status(400).json({ error: 'Enter your 4 to 8 digit Secret PIN.' });
+        return;
+      }
+
+      const upperId = rawIdentifier.toUpperCase();
+      if (/^APP-[A-Z0-9]{6}$/.test(upperId)) {
+        const challengeDoc = await getFirestoreDoc(`otpChallenges/${upperId}`);
+        if (!challengeDoc) {
+          res.status(404).json({ error: 'No application found with that reference code.' });
+          return;
+        }
+
+        const enrolmentId = readStr(challengeDoc.fields, 'enrolmentId');
+        const sealedGatewayStr = readStr(challengeDoc.fields, 'sealedGatewayKey');
+
+        let sealedGateway: SealedGatewayPayload;
+        try {
+          sealedGateway = unsealJson<SealedGatewayPayload>(sealedGatewayStr);
+        } catch {
+          res.status(409).json({ error: 'Unable to unlock application key. Please check server configuration.' });
+          return;
+        }
+
+        if (!sealedGateway.pinHash || !verifyPinHash(pin, sealedGateway.pinHash)) {
+          res.status(401).json({ error: 'Incorrect Secret PIN for this application.' });
+          return;
+        }
+
+        res.status(200).json({
+          enrolmentId,
+          applicationRef: upperId,
+          applications: [{ enrolmentId, applicationRef: upperId }],
+          loginLabel: upperId,
+        });
+        return;
+      }
+
+      if (!/^[+0-9\s-]{7,20}$/.test(rawIdentifier)) {
+        res.status(400).json({
+          error: 'Enter a valid Mobile Number (e.g. 0711234567) or Application Ref (APP-XXXXXX).',
+        });
+        return;
+      }
+
+      const phoneKey = computePhoneHmacKey(rawIdentifier);
+      const docs = await listFirestoreDocs(`phoneAccounts/${phoneKey}`, 'apps');
+      const matched: Array<{ enrolmentId: string; applicationRef: string }> = [];
+
+      for (const docItem of docs) {
+        const sealedPinStr = readStr(docItem.fields, 'sealedPinHash');
+        const enrolmentId = readStr(docItem.fields, 'enrolmentId');
+        const applicationRef = readStr(docItem.fields, 'applicationRef');
+        if (!sealedPinStr || !enrolmentId || !applicationRef) continue;
+        try {
+          const parsed = unsealJson<{ pinHash: string }>(sealedPinStr);
+          if (parsed.pinHash && verifyPinHash(pin, parsed.pinHash)) {
+            matched.push({ enrolmentId, applicationRef });
+          }
+        } catch {
+          // Ignore mismatched sealing keys
+        }
+      }
+
+      if (matched.length === 0) {
+        res.status(401).json({
+          error: 'No matching applications found for that Mobile Number and Secret PIN.',
+        });
+        return;
+      }
+
+      res.status(200).json({
+        enrolmentId: matched[0].enrolmentId,
+        applicationRef: matched[0].applicationRef,
+        applications: matched,
+        loginLabel: rawIdentifier,
+      });
+    } catch (err) {
+      console.error('Account login error:', err);
+      res.status(500).json({ error: 'Unable to sign in to your account right now. Please try again.' });
+    }
+  };
+
+  app.post('/api/account/login', handleAccountLogin);
+  app.post('/api/account/lookup', handleAccountLogin);
+
   app.post('/api/registrations/verify-pin', async (req: Request, res: Response) => {
     try {
       const body = (req.body ?? {}) as Record<string, unknown>;
-      const enrolmentId = typeof body.enrolmentId === 'string' ? body.enrolmentId.trim() : '';
+      const applicationRef = typeof body.applicationRef === 'string' ? body.applicationRef.trim().toUpperCase() : '';
       const pin = typeof body.pin === 'string' ? body.pin.trim() : '';
-      if (!/^[a-zA-Z0-9_-]{24,128}$/.test(enrolmentId) || !/^[0-9]{4,8}$/.test(pin)) {
+      if (!/^APP-[A-Z0-9]{6}$/.test(applicationRef) || !/^[0-9]{4,8}$/.test(pin)) {
         res.status(400).json({ valid: false });
         return;
       }
-      res.status(200).json({ valid: verifyPinHash(pin, hashPin(pin)) });
+      const challengeDoc = await getFirestoreDoc(`otpChallenges/${applicationRef}`);
+      if (!challengeDoc) {
+        res.status(404).json({ valid: false });
+        return;
+      }
+      const sealedGateway = unsealJson<SealedGatewayPayload>(readStr(challengeDoc.fields, 'sealedGatewayKey'));
+      res.status(200).json({ valid: Boolean(sealedGateway.pinHash && verifyPinHash(pin, sealedGateway.pinHash)) });
     } catch {
       res.status(500).json({ valid: false });
     }

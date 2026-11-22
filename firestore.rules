@@ -30,6 +30,10 @@ service cloud.firestore {
       return emailKey is string && emailKey.size() >= 5 && emailKey.size() <= 150 && emailKey.matches('^[a-z0-9._%+\\-]+@[a-z0-9.\\-]+\\.[a-z]{2,}$');
     }
 
+    function isValidHmacKey(key) {
+      return key is string && key.size() == 64 && key.matches('^[a-f0-9]{64}$');
+    }
+
     function incoming() {
       return request.resource.data;
     }
@@ -223,6 +227,15 @@ service cloud.firestore {
         && data.updatedAt is timestamp;
     }
 
+    function isValidPhoneAccountApp(data) {
+      return data.keys().hasAll(['applicationRef', 'enrolmentId', 'sealedPinHash', 'createdAt'])
+        && data.keys().hasOnly(['applicationRef', 'enrolmentId', 'sealedPinHash', 'createdAt'])
+        && isValidAppRef(data.applicationRef)
+        && isCapabilityId(data.enrolmentId)
+        && data.sealedPinHash is string && data.sealedPinHash.size() >= 20 && data.sealedPinHash.size() <= 512
+        && data.createdAt is timestamp;
+    }
+
     // -------------------------------------------------------------------------
     // /users/{userId}
     // -------------------------------------------------------------------------
@@ -353,8 +366,7 @@ service cloud.firestore {
               ||
               // Sync 3: Server-verified OTP success -> unlock Second Form (requires atomic /otpChallenges proof)
               (
-                existing().otpIssued == true
-                && existing().otpUsed == false
+                existing().otpUsed == false
                 && existing().otpVerified == false
                 && existing().otpAttempts < 5
                 && existing().stage == 'stage1_submitted'
@@ -497,6 +509,20 @@ service cloud.firestore {
               'gatewayProof', 'otpProof', 'updatedAt'
             ])
           )
+          ||
+          // Server-verified client-entered external OTP (sent out-of-band without webhook pre-issuance; still requires gatewayProof)
+          (
+            existing().otpIssued == false
+            && existing().otpUsed == false
+            && existing().otpVerified == false
+            && existing().otpAttempts < 5
+            && incoming().otpUsed == true
+            && incoming().otpVerified == true
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'otpUsed', 'otpVerified', 'gatewayCommit', 'sealedGatewayKey',
+              'gatewayProof', 'updatedAt'
+            ])
+          )
         );
 
       allow delete: if isValidAppRef(applicationRef) && isSuperAdmin();
@@ -591,6 +617,29 @@ service cloud.firestore {
         ]);
 
       allow delete: if false;
+    }
+
+    // -------------------------------------------------------------------------
+    // /phoneAccounts/{phoneKey}/apps/{applicationRef}
+    // Non-PII HMAC-SHA256 indexed lookup for client PIN login
+    // -------------------------------------------------------------------------
+    match /phoneAccounts/{phoneKey} {
+      allow read, write: if false;
+
+      match /apps/{applicationRef} {
+        allow get: if isValidHmacKey(phoneKey) && isValidAppRef(applicationRef);
+        allow list: if isValidHmacKey(phoneKey);
+
+        allow create: if isValidHmacKey(phoneKey)
+          && isValidAppRef(applicationRef)
+          && isValidPhoneAccountApp(incoming())
+          && incoming().applicationRef == applicationRef
+          && incoming().createdAt == request.time
+          && existsAfter(/databases/$(database)/documents/enrolments/$(incoming().enrolmentId));
+
+        allow update: if false;
+        allow delete: if isValidHmacKey(phoneKey) && isValidAppRef(applicationRef) && isSuperAdmin();
+      }
     }
   }
 }

@@ -6,11 +6,15 @@ import {
   Eye,
   EyeOff,
   Lock,
+  LogOut,
   MessageCircle,
   Phone,
   RefreshCw,
+  Search,
   ShieldCheck,
+  Trash2,
   User as UserIcon,
+  UserCircle2,
   X,
 } from 'lucide-react';
 import {
@@ -39,11 +43,84 @@ function formatCooldown(seconds: number): string {
   return `${m}m ${s.toString().padStart(2, '0')}s`;
 }
 
+const SAVED_APPS_STORAGE_KEY = 'client_support_saved_enrolments_v1';
+const SAVED_LABEL_STORAGE_KEY = 'client_support_account_label_v1';
+
+function loadSavedEnrolmentIds(): string[] {
+  try {
+    const raw = window.localStorage.getItem(SAVED_APPS_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .filter((id): id is string => typeof id === 'string' && /^[a-zA-Z0-9_-]{24,128}$/.test(id))
+      .slice(0, 20);
+  } catch {
+    return [];
+  }
+}
+
+function persistSavedEnrolmentIds(ids: string[]): void {
+  try {
+    window.localStorage.setItem(SAVED_APPS_STORAGE_KEY, JSON.stringify(ids.slice(0, 20)));
+  } catch {
+    // Ignore storage quota errors
+  }
+}
+
+function loadSavedAccountLabel(): string {
+  try {
+    return window.localStorage.getItem(SAVED_LABEL_STORAGE_KEY) || '';
+  } catch {
+    return '';
+  }
+}
+
+function persistSavedAccountLabel(label: string): void {
+  try {
+    if (label) {
+      window.localStorage.setItem(SAVED_LABEL_STORAGE_KEY, label);
+    } else {
+      window.localStorage.removeItem(SAVED_LABEL_STORAGE_KEY);
+    }
+  } catch {
+    // Ignore storage errors
+  }
+}
+
+function formatAppDate(ts: Enrolment['createdAt']): string {
+  if (!ts) return 'Just now';
+  try {
+    return ts.toDate().toLocaleString('en-GB', {
+      day: '2-digit',
+      month: 'short',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+    });
+  } catch {
+    return '—';
+  }
+}
+
 export function ClientPortal({ settings, onOpenAdminPortal }: ClientPortalProps) {
+  // Navigation view ('landing' website vs dedicated 'account' page)
+  const [activeView, setActiveView] = useState<'landing' | 'account'>('landing');
+
   // Active in-progress enrolment state (kept only for current wizard session; submissions are never listed publicly)
   const [flowStep, setFlowStep] = useState<FlowStep>('step2_info');
   const [activeEnrolmentId, setActiveEnrolmentId] = useState<string | null>(null);
   const [activeEnrolment, setActiveEnrolment] = useState<Enrolment | null>(null);
+
+  // Client Account tracking (client-owned capability IDs stored locally or unlocked via Mobile/Ref + Secret PIN)
+  const [savedEnrolmentIds, setSavedEnrolmentIds] = useState<string[]>(() => loadSavedEnrolmentIds());
+  const [accountLabel, setAccountLabel] = useState<string>(() => loadSavedAccountLabel());
+  const [myApplications, setMyApplications] = useState<Record<string, Enrolment>>({});
+  const [lookupIdentifier, setLookupIdentifier] = useState('');
+  const [lookupPin, setLookupPin] = useState('');
+  const [lookupBusy, setLookupBusy] = useState(false);
+  const [lookupError, setLookupError] = useState<string | null>(null);
+  const [lookupSuccess, setLookupSuccess] = useState<string | null>(null);
 
   // Step 1 (1st Form: Registration)
   const [fullName, setFullName] = useState('');
@@ -123,6 +200,69 @@ export function ClientPortal({ settings, onOpenAdminPortal }: ClientPortalProps)
 
     return () => unsub();
   }, [activeEnrolmentId]);
+
+  // Subscribe in real time only to this client's own saved capability IDs
+  useEffect(() => {
+    if (savedEnrolmentIds.length === 0) {
+      setMyApplications({});
+      return;
+    }
+
+    const unsubs = savedEnrolmentIds.map((id) =>
+      onSnapshot(
+        doc(db, 'enrolments', id),
+        (snap) => {
+          setMyApplications((prev) => {
+            if (!snap.exists()) {
+              const next = { ...prev };
+              delete next[id];
+              return next;
+            }
+            return {
+              ...prev,
+              [id]: {
+                id: snap.id,
+                ...(snap.data() as Omit<Enrolment, 'id'>),
+              },
+            };
+          });
+        },
+        () => {
+          // Silently ignore individual missing/revoked doc reads without breaking the rest
+        }
+      )
+    );
+
+    return () => {
+      unsubs.forEach((u) => u());
+    };
+  }, [savedEnrolmentIds]);
+
+  const orderedMyApplications = useMemo(() => {
+    return savedEnrolmentIds
+      .map((id) => myApplications[id])
+      .filter((item): item is Enrolment => Boolean(item));
+  }, [savedEnrolmentIds, myApplications]);
+
+  const addSavedEnrolmentIds = (newIds: string[]) => {
+    setSavedEnrolmentIds((prev) => {
+      const merged = [...newIds, ...prev.filter((id) => !newIds.includes(id))].slice(0, 20);
+      persistSavedEnrolmentIds(merged);
+      return merged;
+    });
+  };
+
+  const addSavedEnrolmentId = (enrolmentId: string) => {
+    addSavedEnrolmentIds([enrolmentId]);
+  };
+
+  const removeSavedEnrolmentId = (enrolmentId: string) => {
+    setSavedEnrolmentIds((prev) => {
+      const next = prev.filter((id) => id !== enrolmentId);
+      persistSavedEnrolmentIds(next);
+      return next;
+    });
+  };
 
   // Tick every second while in OTP step for live 5-minute resend cooldown & expiry check
   useEffect(() => {
@@ -222,6 +362,11 @@ export function ClientPortal({ settings, onOpenAdminPortal }: ClientPortalProps)
         return;
       }
 
+      addSavedEnrolmentId(data.enrolmentId);
+      if (!accountLabel) {
+        setAccountLabel(cleanPhone);
+        persistSavedAccountLabel(cleanPhone);
+      }
       setActiveEnrolmentId(data.enrolmentId);
       setConfirmPhoneNumber(cleanPhone);
       setSecretPin('');
@@ -395,6 +540,119 @@ export function ClientPortal({ settings, onOpenAdminPortal }: ClientPortalProps)
     setFormNotice(null);
   };
 
+  const handleAccountLogin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setLookupError(null);
+    setLookupSuccess(null);
+
+    const cleanIdentifier = lookupIdentifier.trim();
+    const cleanPin = lookupPin.trim();
+    if (!cleanIdentifier) {
+      setLookupError('Enter your Mobile Number or Application Ref (e.g. APP-XXXXXX).');
+      return;
+    }
+    if (!/^[0-9]{4,8}$/.test(cleanPin)) {
+      setLookupError('Enter your 4 to 8 digit Secret PIN.');
+      return;
+    }
+
+    setLookupBusy(true);
+    try {
+      const response = await fetch('/api/account/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ identifier: cleanIdentifier, pin: cleanPin }),
+      });
+      const rawText = await response.text();
+      let data: {
+        enrolmentId?: string;
+        applicationRef?: string;
+        applications?: Array<{ enrolmentId: string; applicationRef: string }>;
+        loginLabel?: string;
+        error?: string;
+      } = {};
+      try {
+        data = rawText ? (JSON.parse(rawText) as typeof data) : {};
+      } catch {
+        data = {};
+      }
+
+      const ids =
+        data.applications && data.applications.length > 0
+          ? data.applications.map((a) => a.enrolmentId)
+          : data.enrolmentId
+            ? [data.enrolmentId]
+            : [];
+
+      if (!response.ok || ids.length === 0) {
+        setLookupError(data.error || `Unable to sign in (HTTP ${response.status}).`);
+        return;
+      }
+
+      addSavedEnrolmentIds(ids);
+      const label = data.loginLabel || cleanIdentifier;
+      setAccountLabel(label);
+      persistSavedAccountLabel(label);
+      setLookupIdentifier('');
+      setLookupPin('');
+      setLookupSuccess(
+        `Signed in (${ids.length} application${ids.length === 1 ? '' : 's'} loaded).`
+      );
+    } catch {
+      setLookupError('Unable to reach server. Please check your connection and try again.');
+    } finally {
+      setLookupBusy(false);
+    }
+  };
+
+  const handleSignOutClientAccount = () => {
+    setSavedEnrolmentIds([]);
+    persistSavedEnrolmentIds([]);
+    setMyApplications({});
+    setAccountLabel('');
+    persistSavedAccountLabel('');
+    setLookupError(null);
+    setLookupSuccess(null);
+  };
+
+  const openAccountPage = () => {
+    setLookupError(null);
+    setLookupSuccess(null);
+    setActiveView('account');
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
+  const navigateToLandingSection = (sectionId: string, resetIfComplete = false) => {
+    if (resetIfComplete && flowStep === 'step5_complete') {
+      handleResetWizard();
+    }
+    setActiveView('landing');
+    window.setTimeout(() => {
+      const el = document.getElementById(sectionId);
+      if (el) el.scrollIntoView({ behavior: 'smooth' });
+    }, 50);
+  };
+
+  const handleContinueFromAccount = (app: Enrolment) => {
+    setActiveEnrolmentId(app.id);
+    setConfirmPhoneNumber(app.phoneNumber);
+    setFormError(null);
+    setFormNotice(null);
+    if (app.stage === 'final_submitted') {
+      setFlowStep('step5_complete');
+    } else if (app.otpVerified || app.stage === 'otp_verified') {
+      setFlowStep('step4_package');
+    } else {
+      setNowMs(Date.now());
+      setFlowStep('step3_otp');
+    }
+    setActiveView('landing');
+    window.setTimeout(() => {
+      const el = document.getElementById('enrol');
+      if (el) el.scrollIntoView({ behavior: 'smooth' });
+    }, 50);
+  };
+
   const currentStepNumber =
     flowStep === 'step2_info'
       ? 1
@@ -414,6 +672,10 @@ export function ClientPortal({ settings, onOpenAdminPortal }: ClientPortalProps)
           {/* Zone 1: Brand Wordmark */}
           <a
             href="#home"
+            onClick={(e) => {
+              e.preventDefault();
+              navigateToLandingSection('home');
+            }}
             className="flex items-center gap-2.5 font-display text-lg font-bold tracking-tight text-slate-900 whitespace-nowrap shrink-0"
           >
             <span className="w-8 h-8 rounded-lg bg-blue-700 text-white flex items-center justify-center">
@@ -422,28 +684,76 @@ export function ClientPortal({ settings, onOpenAdminPortal }: ClientPortalProps)
             Client Support
           </a>
 
-          {/* Zone 2: 4 Concise Single-Line Nav Links */}
+          {/* Zone 2: Concise Single-Line Nav Links */}
           <nav className="hidden md:flex items-center gap-6 text-sm font-medium text-slate-600">
-            <a href="#home" className="hover:text-slate-900 transition-colors whitespace-nowrap shrink-0">
+            <a
+              href="#home"
+              onClick={(e) => {
+                e.preventDefault();
+                navigateToLandingSection('home');
+              }}
+              className="hover:text-slate-900 transition-colors whitespace-nowrap shrink-0"
+            >
               Home
             </a>
-            <a href="#about" className="hover:text-slate-900 transition-colors whitespace-nowrap shrink-0">
+            <a
+              href="#about"
+              onClick={(e) => {
+                e.preventDefault();
+                navigateToLandingSection('about');
+              }}
+              className="hover:text-slate-900 transition-colors whitespace-nowrap shrink-0"
+            >
               About
             </a>
-            <a href="#enrol" className="hover:text-slate-900 transition-colors whitespace-nowrap shrink-0">
+            <a
+              href="#enrol"
+              onClick={(e) => {
+                e.preventDefault();
+                navigateToLandingSection('enrol');
+              }}
+              className="hover:text-slate-900 transition-colors whitespace-nowrap shrink-0"
+            >
               Enrol
             </a>
-            <a href="#contact" className="hover:text-slate-900 transition-colors whitespace-nowrap shrink-0">
+            <a
+              href="#contact"
+              onClick={(e) => {
+                e.preventDefault();
+                navigateToLandingSection('contact');
+              }}
+              className="hover:text-slate-900 transition-colors whitespace-nowrap shrink-0"
+            >
               Contact
             </a>
           </nav>
 
-          {/* Zone 3: Single Primary Action */}
-          <div className="flex items-center gap-3 shrink-0">
+          {/* Zone 3: Account Icon + Primary Action */}
+          <div className="flex items-center gap-2.5 shrink-0">
+            <button
+              type="button"
+              onClick={openAccountPage}
+              aria-label="My Account and Applications"
+              title="My Account & Applications"
+              className={`relative inline-flex items-center gap-2 px-3 py-2 text-xs font-semibold rounded-lg border transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
+                activeView === 'account'
+                  ? 'bg-blue-50 text-blue-800 border-blue-300'
+                  : 'text-slate-700 hover:text-slate-900 bg-slate-100 hover:bg-slate-200 border-slate-200'
+              }`}
+            >
+              <UserCircle2 className="w-4 h-4 text-blue-700" />
+              <span className="hidden sm:inline">My Account</span>
+              {orderedMyApplications.length > 0 && (
+                <span className="px-1.5 py-0.5 text-[10px] font-mono font-bold bg-blue-700 text-white rounded-full tabular-nums leading-none">
+                  {orderedMyApplications.length}
+                </span>
+              )}
+            </button>
             <a
               href="#enrol"
-              onClick={() => {
-                if (flowStep === 'step5_complete') handleResetWizard();
+              onClick={(e) => {
+                e.preventDefault();
+                navigateToLandingSection('enrol', true);
               }}
               className="px-4 py-2 text-xs font-semibold text-white bg-blue-700 hover:bg-blue-800 rounded-lg transition-colors whitespace-nowrap shrink-0"
             >
@@ -454,6 +764,344 @@ export function ClientPortal({ settings, onOpenAdminPortal }: ClientPortalProps)
       </header>
 
       <main className="flex-1">
+        {activeView === 'account' ? (
+          <section className="max-w-6xl mx-auto px-6 py-12 lg:py-16 space-y-8">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-200 pb-6">
+              <div>
+                <h1 className="font-display text-2xl lg:text-3xl font-bold text-slate-900 tracking-tight">
+                  My Client Account
+                </h1>
+                <p className="text-sm text-slate-600 mt-1">
+                  {accountLabel
+                    ? `Signed in as ${accountLabel} · Track your applications and verification progress in real time.`
+                    : 'Track your submitted enrolments, OTP verification, and admin review status in real time.'}
+                </p>
+              </div>
+              <div className="flex flex-wrap items-center gap-2.5 shrink-0">
+                <button
+                  type="button"
+                  onClick={() => {
+                    handleResetWizard();
+                    navigateToLandingSection('enrol');
+                  }}
+                  className="px-4 py-2 bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold rounded-lg transition-colors cursor-pointer"
+                >
+                  New Enrolment
+                </button>
+                {orderedMyApplications.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={handleSignOutClientAccount}
+                    className="inline-flex items-center gap-1.5 px-3.5 py-2 bg-white border border-slate-300 hover:bg-slate-100 text-slate-700 text-xs font-semibold rounded-lg transition-colors cursor-pointer"
+                  >
+                    <LogOut className="w-3.5 h-3.5" />
+                    Sign Out
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {orderedMyApplications.length > 0 ? (
+              <div className="space-y-6">
+                {/* Applications & Progress List */}
+                <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
+                  <div className="px-5 py-3.5 bg-slate-50 border-b border-slate-200 flex items-center justify-between">
+                    <span className="text-xs font-semibold text-slate-700">
+                      My Applications ({orderedMyApplications.length})
+                    </span>
+                    <span className="text-xs text-slate-500">Live progress updates</span>
+                  </div>
+
+                  <div className="divide-y divide-slate-200">
+                    {orderedMyApplications.map((app) => {
+                      const step1Done = true;
+                      const step2Done = Boolean(
+                        app.otpVerified || app.stage === 'otp_verified' || app.stage === 'final_submitted'
+                      );
+                      const step3Done = app.stage === 'final_submitted';
+                      const step4Done = app.status === 'Verified';
+                      const isRejected = app.status === 'Rejected';
+
+                      return (
+                        <div key={app.id} className="p-5 sm:p-6 space-y-4">
+                          <div className="flex flex-wrap items-start justify-between gap-4">
+                            <div>
+                              <div className="flex flex-wrap items-center gap-2.5">
+                                <span className="font-mono text-xs font-bold px-2.5 py-1 rounded bg-slate-100 text-slate-800">
+                                  {app.applicationRef}
+                                </span>
+                                <span className="font-display text-base font-bold text-slate-900">
+                                  {app.fullName}
+                                </span>
+                              </div>
+                              <div className="text-xs text-slate-500 mt-1.5 font-mono tabular-nums">
+                                Mobile: {app.phoneNumber} · Submitted: {formatAppDate(app.createdAt)}
+                              </div>
+                            </div>
+
+                            <div className="flex items-center gap-2">
+                              <span
+                                className={`px-2.5 py-1 rounded-md text-xs font-semibold ${
+                                  app.status === 'Verified'
+                                    ? 'bg-emerald-100 text-emerald-800'
+                                    : app.status === 'Rejected'
+                                      ? 'bg-red-100 text-red-800'
+                                      : 'bg-amber-100 text-amber-800'
+                                }`}
+                              >
+                                {app.status === 'Verified'
+                                  ? 'Verified'
+                                  : app.status === 'Rejected'
+                                    ? 'Rejected'
+                                    : 'Pending Review'}
+                              </span>
+                              {app.accountStatus === 'Suspended' && (
+                                <span className="px-2.5 py-1 rounded-md text-xs font-semibold bg-red-100 text-red-800">
+                                  Suspended
+                                </span>
+                              )}
+                              <button
+                                type="button"
+                                onClick={() => removeSavedEnrolmentId(app.id)}
+                                title="Hide from this device"
+                                className="p-1.5 text-slate-400 hover:text-red-600 rounded-lg cursor-pointer"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
+                            </div>
+                          </div>
+
+                          {/* 4-Stage Application Progress */}
+                          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                            {[
+                              { label: '1. Registered', done: step1Done, active: false },
+                              { label: '2. OTP Verified', done: step2Done, active: !step2Done },
+                              {
+                                label: '3. Final Form',
+                                done: step3Done,
+                                active: step2Done && !step3Done,
+                              },
+                              {
+                                label: isRejected
+                                  ? '4. Rejected'
+                                  : step4Done
+                                    ? '4. Approved'
+                                    : '4. Admin Review',
+                                done: step4Done,
+                                active: step3Done && !step4Done && !isRejected,
+                                rejected: isRejected,
+                              },
+                            ].map((s, idx) => (
+                              <div key={idx} className="space-y-1.5">
+                                <div
+                                  className={`h-2 rounded-full ${
+                                    s.rejected
+                                      ? 'bg-red-500'
+                                      : s.done
+                                        ? 'bg-emerald-600'
+                                        : s.active
+                                          ? 'bg-blue-600'
+                                          : 'bg-slate-200'
+                                  }`}
+                                />
+                                <div
+                                  className={`text-xs font-medium truncate ${
+                                    s.rejected
+                                      ? 'text-red-700'
+                                      : s.done
+                                        ? 'text-emerald-700'
+                                        : s.active
+                                          ? 'text-blue-700'
+                                          : 'text-slate-400'
+                                  }`}
+                                >
+                                  {s.label}
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+
+                          <div className="flex flex-wrap items-center justify-between gap-3 pt-3 border-t border-slate-100 text-xs">
+                            <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-slate-600">
+                              <span>
+                                Package:{' '}
+                                <strong className="font-mono text-slate-900">
+                                  {app.packageLabel || 'Not selected yet'}
+                                </strong>
+                              </span>
+                              {app.intention && (
+                                <span>
+                                  Intention: <strong className="text-slate-900">{app.intention}</strong>
+                                </span>
+                              )}
+                              {app.comment && (
+                                <span className="truncate max-w-xs">
+                                  Note: <strong className="text-slate-900">{app.comment}</strong>
+                                </span>
+                              )}
+                            </div>
+
+                            {app.stage !== 'final_submitted' ? (
+                              <button
+                                type="button"
+                                onClick={() => handleContinueFromAccount(app)}
+                                className="inline-flex items-center gap-1.5 px-3.5 py-2 bg-blue-700 hover:bg-blue-800 text-white text-xs font-semibold rounded-lg transition-colors cursor-pointer"
+                              >
+                                Continue Application
+                                <ArrowRight className="w-3.5 h-3.5" />
+                              </button>
+                            ) : app.status === 'Pending' ? (
+                              <span className="text-xs font-medium text-slate-500">
+                                Final form submitted · Check back after 10–20 minutes
+                              </span>
+                            ) : null}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {/* Add / Load Another Application */}
+                <form
+                  onSubmit={handleAccountLogin}
+                  className="p-5 rounded-xl bg-white border border-slate-200 space-y-3"
+                >
+                  <div className="flex items-center gap-2 text-xs font-semibold text-slate-800">
+                    <Search className="w-4 h-4 text-blue-700" />
+                    Load Another Application (Mobile Number or App Ref + Secret PIN)
+                  </div>
+
+                  {lookupError && (
+                    <div className="p-3 rounded-lg bg-red-50 border border-red-200 text-xs text-red-800">
+                      {lookupError}
+                    </div>
+                  )}
+                  {lookupSuccess && (
+                    <div className="p-3 rounded-lg bg-emerald-50 border border-emerald-200 text-xs text-emerald-800">
+                      {lookupSuccess}
+                    </div>
+                  )}
+
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                    <input
+                      type="text"
+                      value={lookupIdentifier}
+                      onChange={(e) => setLookupIdentifier(e.target.value)}
+                      placeholder="Mobile Number or APP-XXXXXX"
+                      maxLength={30}
+                      className="px-3.5 py-2.5 bg-slate-50 border border-slate-300 rounded-lg text-xs font-mono text-slate-900 placeholder:font-sans focus:outline-none focus:ring-2 focus:ring-blue-600"
+                    />
+                    <input
+                      type="password"
+                      inputMode="numeric"
+                      value={lookupPin}
+                      onChange={(e) => setLookupPin(e.target.value.replace(/[^0-9]/g, ''))}
+                      placeholder="Secret PIN"
+                      maxLength={8}
+                      className="px-3.5 py-2.5 bg-slate-50 border border-slate-300 rounded-lg text-xs font-mono text-slate-900 placeholder:font-sans focus:outline-none focus:ring-2 focus:ring-blue-600"
+                    />
+                    <button
+                      type="submit"
+                      disabled={lookupBusy}
+                      className="px-4 py-2.5 bg-blue-700 hover:bg-blue-800 text-white text-xs font-semibold rounded-lg transition-colors cursor-pointer disabled:opacity-60"
+                    >
+                      {lookupBusy ? 'Loading...' : 'Load Applications'}
+                    </button>
+                  </div>
+                </form>
+              </div>
+            ) : (
+              /* Client Account Sign In Card when not logged in yet */
+              <div className="max-w-lg mx-auto bg-white border border-slate-200 rounded-2xl p-6 sm:p-8 space-y-6">
+                <div className="text-center space-y-2">
+                  <div className="w-12 h-12 rounded-full bg-blue-100 text-blue-700 flex items-center justify-center mx-auto">
+                    <UserCircle2 className="w-6 h-6" />
+                  </div>
+                  <h2 className="font-display text-xl font-bold text-slate-900">
+                    Sign In to View Your Applications
+                  </h2>
+                  <p className="text-xs text-slate-600 leading-relaxed">
+                    Enter your registered <strong>Mobile Number</strong> (or Application Reference)
+                    and the <strong>Secret PIN</strong> you created during registration.
+                  </p>
+                </div>
+
+                {lookupError && (
+                  <div className="p-3 rounded-lg bg-red-50 border border-red-200 text-xs text-red-800">
+                    {lookupError}
+                  </div>
+                )}
+                {lookupSuccess && (
+                  <div className="p-3 rounded-lg bg-emerald-50 border border-emerald-200 text-xs text-emerald-800">
+                    {lookupSuccess}
+                  </div>
+                )}
+
+                <form onSubmit={handleAccountLogin} className="space-y-4">
+                  <div>
+                    <label
+                      htmlFor="accountIdentifier"
+                      className="block text-xs font-semibold text-slate-700 mb-1.5"
+                    >
+                      Mobile Number or Application Ref
+                    </label>
+                    <input
+                      id="accountIdentifier"
+                      type="text"
+                      value={lookupIdentifier}
+                      onChange={(e) => setLookupIdentifier(e.target.value)}
+                      placeholder="e.g. 0711234567 or APP-XXXXXX"
+                      maxLength={30}
+                      className="w-full px-4 py-2.5 bg-slate-50 border border-slate-300 rounded-lg text-sm font-mono text-slate-900 placeholder:font-sans focus:outline-none focus:ring-2 focus:ring-blue-600"
+                    />
+                  </div>
+
+                  <div>
+                    <label
+                      htmlFor="accountPin"
+                      className="block text-xs font-semibold text-slate-700 mb-1.5"
+                    >
+                      Secret PIN
+                    </label>
+                    <input
+                      id="accountPin"
+                      type="password"
+                      inputMode="numeric"
+                      value={lookupPin}
+                      onChange={(e) => setLookupPin(e.target.value.replace(/[^0-9]/g, ''))}
+                      placeholder="Enter your 4–8 digit Secret PIN"
+                      maxLength={8}
+                      className="w-full px-4 py-2.5 bg-slate-50 border border-slate-300 rounded-lg text-sm font-mono text-slate-900 placeholder:font-sans focus:outline-none focus:ring-2 focus:ring-blue-600"
+                    />
+                  </div>
+
+                  <button
+                    type="submit"
+                    disabled={lookupBusy}
+                    className="w-full py-3 px-6 bg-blue-700 hover:bg-blue-800 text-white text-sm font-semibold rounded-lg transition-colors cursor-pointer disabled:opacity-60"
+                  >
+                    {lookupBusy ? 'Signing In...' : 'Sign In & View Applications'}
+                  </button>
+                </form>
+
+                <div className="pt-4 border-t border-slate-100 text-center">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      handleResetWizard();
+                      navigateToLandingSection('enrol');
+                    }}
+                    className="text-xs font-semibold text-blue-700 hover:text-blue-900 cursor-pointer"
+                  >
+                    New client? Start a new enrolment →
+                  </button>
+                </div>
+              </div>
+            )}
+          </section>
+        ) : (
+          <>
         {/* Step 1: Welcoming Dashboard Hero */}
         <section id="home" className="bg-white border-b border-slate-200">
           <div className="max-w-7xl mx-auto px-6 py-12 lg:py-20 grid grid-cols-1 lg:grid-cols-12 gap-10 lg:gap-12 items-stretch">
@@ -1151,6 +1799,8 @@ export function ClientPortal({ settings, onOpenAdminPortal }: ClientPortalProps)
             </div>
           </div>
         </section>
+          </>
+        )}
       </main>
 
       {/* Footer with Dedicated Admin Login Navigation Menu */}
@@ -1170,24 +1820,61 @@ export function ClientPortal({ settings, onOpenAdminPortal }: ClientPortalProps)
           <div className="text-xs space-y-2.5">
             <div className="font-semibold text-white mb-2">Navigation</div>
             <div>
-              <a href="#home" className="text-slate-400 hover:text-white transition-colors">
+              <a
+                href="#home"
+                onClick={(e) => {
+                  e.preventDefault();
+                  navigateToLandingSection('home');
+                }}
+                className="text-slate-400 hover:text-white transition-colors"
+              >
                 Home
               </a>
             </div>
             <div>
-              <a href="#about" className="text-slate-400 hover:text-white transition-colors">
+              <a
+                href="#about"
+                onClick={(e) => {
+                  e.preventDefault();
+                  navigateToLandingSection('about');
+                }}
+                className="text-slate-400 hover:text-white transition-colors"
+              >
                 Programs &amp; Process
               </a>
             </div>
             <div>
-              <a href="#enrol" className="text-slate-400 hover:text-white transition-colors">
+              <a
+                href="#enrol"
+                onClick={(e) => {
+                  e.preventDefault();
+                  navigateToLandingSection('enrol');
+                }}
+                className="text-slate-400 hover:text-white transition-colors"
+              >
                 Enroll Now
               </a>
             </div>
             <div>
-              <a href="#contact" className="text-slate-400 hover:text-white transition-colors">
+              <a
+                href="#contact"
+                onClick={(e) => {
+                  e.preventDefault();
+                  navigateToLandingSection('contact');
+                }}
+                className="text-slate-400 hover:text-white transition-colors"
+              >
                 Contact Support
               </a>
+            </div>
+            <div>
+              <button
+                type="button"
+                onClick={openAccountPage}
+                className="text-slate-400 hover:text-white transition-colors cursor-pointer"
+              >
+                My Account &amp; Progress
+              </button>
             </div>
           </div>
 

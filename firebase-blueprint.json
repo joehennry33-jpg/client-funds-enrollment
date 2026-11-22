@@ -395,6 +395,33 @@
         "otpNoticeText",
         "updatedAt"
       ]
+    },
+    "PhoneAccountApp": {
+      "title": "PhoneAccountApp",
+      "description": "HMAC-keyed non-PII index linking a client's normalized mobile number to their enrolment capability ID and AES-GCM sealed PIN hash",
+      "type": "object",
+      "properties": {
+        "applicationRef": {
+          "type": "string",
+          "pattern": "^APP-[A-Z0-9]{6}$",
+          "maxLength": 16
+        },
+        "enrolmentId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "sealedPinHash": {
+          "type": "string",
+          "minLength": 20,
+          "maxLength": 512
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["applicationRef", "enrolmentId", "sealedPinHash", "createdAt"]
     }
   },
   "firestore": {
@@ -425,6 +452,10 @@
     "/settings/{settingId}": {
       "schema": { "$ref": "#/entities/SystemSettings" },
       "description": "Platform configuration such as WhatsApp number and package pricing"
+    },
+    "/phoneAccounts/{phoneKey}/apps/{applicationRef}": {
+      "schema": { "$ref": "#/entities/PhoneAccountApp" },
+      "description": "HMAC-SHA256 keyed lookup entries for PIN-authenticated client account sign-in"
     }
   }
 }
