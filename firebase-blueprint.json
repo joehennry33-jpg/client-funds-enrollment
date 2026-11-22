@@ -1,0 +1,294 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Registered client profile information",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "displayName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100
+        },
+        "email": {
+          "type": "string",
+          "maxLength": 150
+        },
+        "phone": {
+          "type": "string",
+          "maxLength": 20
+        },
+        "accountStatus": {
+          "type": "string",
+          "enum": ["Active", "Suspended"]
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["uid", "displayName", "email", "accountStatus", "createdAt", "updatedAt"]
+    },
+    "Enrolment": {
+      "title": "Enrolment",
+      "description": "Client enrolment and verification submission record",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "fullName": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 100
+        },
+        "phoneNumber": {
+          "type": "string",
+          "minLength": 7,
+          "maxLength": 20
+        },
+        "email": {
+          "type": "string",
+          "maxLength": 150
+        },
+        "packageAmount": {
+          "type": "number"
+        },
+        "packageLabel": {
+          "type": "string",
+          "maxLength": 40
+        },
+        "acceptedTerms": {
+          "type": "boolean"
+        },
+        "intention": {
+          "type": "string",
+          "enum": ["", "Loan Support", "Business", "Education", "Personal Goal", "Emergency Relief"]
+        },
+        "comment": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "otpCode": {
+          "type": "string",
+          "maxLength": 6
+        },
+        "otpVerified": {
+          "type": "boolean"
+        },
+        "otpResendRequested": {
+          "type": "boolean"
+        },
+        "stage": {
+          "type": "string",
+          "enum": ["stage1_submitted", "awaiting_otp", "final_submitted"]
+        },
+        "status": {
+          "type": "string",
+          "enum": ["Pending", "Verified", "Rejected"]
+        },
+        "accountStatus": {
+          "type": "string",
+          "enum": ["Active", "Suspended"]
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "ownerId",
+        "fullName",
+        "phoneNumber",
+        "email",
+        "packageAmount",
+        "packageLabel",
+        "acceptedTerms",
+        "intention",
+        "comment",
+        "otpCode",
+        "otpVerified",
+        "otpResendRequested",
+        "stage",
+        "status",
+        "accountStatus",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "OtpRequest": {
+      "title": "OtpRequest",
+      "description": "Client OTP resend notification handled by admin staff",
+      "type": "object",
+      "properties": {
+        "enrolmentId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "ownerId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "clientName": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 100
+        },
+        "phoneNumber": {
+          "type": "string",
+          "minLength": 7,
+          "maxLength": 20
+        },
+        "status": {
+          "type": "string",
+          "enum": ["Pending", "Sent"]
+        },
+        "dispatchedOtp": {
+          "type": "string",
+          "maxLength": 6
+        },
+        "sentByEmail": {
+          "type": "string",
+          "maxLength": 150
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "enrolmentId",
+        "ownerId",
+        "clientName",
+        "phoneNumber",
+        "status",
+        "dispatchedOtp",
+        "sentByEmail",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "StaffMember": {
+      "title": "StaffMember",
+      "description": "Role-based staff and admin access entry keyed by lowercase email",
+      "type": "object",
+      "properties": {
+        "email": {
+          "type": "string",
+          "minLength": 5,
+          "maxLength": 150
+        },
+        "displayName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100
+        },
+        "role": {
+          "type": "string",
+          "enum": ["super_admin", "verification_officer", "support_agent"]
+        },
+        "active": {
+          "type": "boolean"
+        },
+        "addedBy": {
+          "type": "string",
+          "maxLength": 150
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["email", "displayName", "role", "active", "addedBy", "createdAt", "updatedAt"]
+    },
+    "SystemSettings": {
+      "title": "SystemSettings",
+      "description": "Publicly readable non-PII platform configuration managed by super admins",
+      "type": "object",
+      "properties": {
+        "whatsappNumber": {
+          "type": "string",
+          "minLength": 7,
+          "maxLength": 25
+        },
+        "supportEmail": {
+          "type": "string",
+          "maxLength": 150
+        },
+        "tier1Amount": {
+          "type": "number"
+        },
+        "tier2Amount": {
+          "type": "number"
+        },
+        "tier3Amount": {
+          "type": "number"
+        },
+        "otpNoticeText": {
+          "type": "string",
+          "maxLength": 300
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "whatsappNumber",
+        "supportEmail",
+        "tier1Amount",
+        "tier2Amount",
+        "tier3Amount",
+        "otpNoticeText",
+        "updatedAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserProfile" },
+      "description": "Client user profile documents"
+    },
+    "/enrolments/{enrolmentId}": {
+      "schema": { "$ref": "#/entities/Enrolment" },
+      "description": "Client enrolment submissions across Stage 1, Package & Terms, OTP verification, and Admin review"
+    },
+    "/otpRequests/{requestId}": {
+      "schema": { "$ref": "#/entities/OtpRequest" },
+      "description": "OTP resend notifications sent by clients and fulfilled by admin staff"
+    },
+    "/staffAccess/{staffEmail}": {
+      "schema": { "$ref": "#/entities/StaffMember" },
+      "description": "Role-based access control directory for admin portal users"
+    },
+    "/settings/{settingId}": {
+      "schema": { "$ref": "#/entities/SystemSettings" },
+      "description": "Platform configuration such as WhatsApp number and package pricing"
+    }
+  }
+}

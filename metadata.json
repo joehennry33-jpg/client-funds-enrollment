@@ -1,0 +1,8 @@
+{
+  "name": "Client Support — Enrolment & Admin Portal",
+  "description": "Client enrolment, OTP phone verification, and role-based administrative dashboard.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
