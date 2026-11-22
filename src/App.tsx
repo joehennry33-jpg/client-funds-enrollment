@@ -12,14 +12,28 @@ import {
 } from './types';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { ClientPortal } from './components/ClientPortal';
+import { AdminConsoleGate } from './components/AdminConsoleGate';
 import { AdminLoginPortal } from './components/AdminLoginPortal';
 import { AdminDashboard } from './components/AdminDashboard';
+
+function isAdminConsoleLocation(): boolean {
+  const pathname = window.location.pathname.replace(/\/+$/, '') || '/';
+  const hash = window.location.hash.toLowerCase();
+  return (
+    pathname === '/admin-console' ||
+    pathname === '/admin' ||
+    hash === '#admin-console' ||
+    hash === '#admin'
+  );
+}
 
 function AppContent() {
   const [user, setUser] = useState<User | null>(null);
   const [authReady, setAuthReady] = useState(false);
 
-  const [viewMode, setViewMode] = useState<'public' | 'admin'>('public');
+  const [isAdminRoute, setIsAdminRoute] = useState<boolean>(() => isAdminConsoleLocation());
+  // Keep URL unlock Bearer token strictly in React memory (never persisted to Web Storage)
+  const [adminConsoleToken, setAdminConsoleToken] = useState<string | null>(null);
   const [checkingRole, setCheckingRole] = useState(false);
   const [resolvedRole, setResolvedRole] = useState<StaffRole | null>(null);
   const [authRefreshTick, setAuthRefreshTick] = useState(0);
@@ -27,6 +41,28 @@ function AppContent() {
   const [settings, setSettings] = useState<Omit<SystemSettings, 'updatedAt'>>(
     DEFAULT_SYSTEM_SETTINGS
   );
+
+  // Sync URL route for /admin-console (and normalize /admin -> /admin-console)
+  useEffect(() => {
+    const normalizePath = () => {
+      const pathname = window.location.pathname.replace(/\/+$/, '') || '/';
+      const hash = window.location.hash.toLowerCase();
+      if (pathname === '/admin' || hash === '#admin' || hash === '#admin-console') {
+        window.history.replaceState({}, '', '/admin-console');
+        setIsAdminRoute(true);
+      } else {
+        setIsAdminRoute(pathname === '/admin-console');
+      }
+    };
+
+    normalizePath();
+    window.addEventListener('popstate', normalizePath);
+    window.addEventListener('hashchange', normalizePath);
+    return () => {
+      window.removeEventListener('popstate', normalizePath);
+      window.removeEventListener('hashchange', normalizePath);
+    };
+  }, []);
 
   // Listen for Firebase Auth state
   useEffect(() => {
@@ -61,9 +97,9 @@ function AppContent() {
     return () => unsub();
   }, []);
 
-  // Resolve staff role when accessing the hidden Admin Portal
+  // Resolve staff role when accessing the unlocked /admin-console route
   useEffect(() => {
-    if (viewMode !== 'admin') return;
+    if (!isAdminRoute || !adminConsoleToken) return;
     if (!authReady || !user || !user.email || !user.emailVerified) {
       setResolvedRole(null);
       setCheckingRole(false);
@@ -99,15 +135,12 @@ function AppContent() {
     return () => {
       cancelled = true;
     };
-  }, [viewMode, authReady, user, authRefreshTick]);
-
-  const handleOpenAdminPortal = () => {
-    setViewMode('admin');
-    window.scrollTo({ top: 0, behavior: 'instant' as ScrollBehavior });
-  };
+  }, [isAdminRoute, adminConsoleToken, authReady, user, authRefreshTick]);
 
   const handleBackToWebsite = () => {
-    setViewMode('public');
+    setAdminConsoleToken(null);
+    setIsAdminRoute(false);
+    window.history.pushState({}, '', '/');
     window.scrollTo({ top: 0, behavior: 'instant' as ScrollBehavior });
   };
 
@@ -120,7 +153,16 @@ function AppContent() {
     }
   };
 
-  if (viewMode === 'admin') {
+  if (isAdminRoute) {
+    if (!adminConsoleToken) {
+      return (
+        <AdminConsoleGate
+          onUnlocked={(token) => setAdminConsoleToken(token)}
+          onBackToWebsite={handleBackToWebsite}
+        />
+      );
+    }
+
     if (user && resolvedRole && !checkingRole) {
       return (
         <AdminDashboard
@@ -142,12 +184,7 @@ function AppContent() {
     );
   }
 
-  return (
-    <ClientPortal
-      settings={settings}
-      onOpenAdminPortal={handleOpenAdminPortal}
-    />
-  );
+  return <ClientPortal settings={settings} />;
 }
 
 export default function App() {

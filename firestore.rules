@@ -236,6 +236,16 @@ service cloud.firestore {
         && data.createdAt is timestamp;
     }
 
+    function isValidAdminConsoleGate(data) {
+      return data.keys().hasAll(['passwordHash', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['passwordHash', 'createdAt', 'updatedAt'])
+        && data.passwordHash is string
+        && data.passwordHash.size() == 168
+        && data.passwordHash.matches('^scrypt\\$[a-f0-9]{32}\\$[a-f0-9]{128}$')
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
     // -------------------------------------------------------------------------
     // /users/{userId}
     // -------------------------------------------------------------------------
@@ -640,6 +650,29 @@ service cloud.firestore {
         allow update: if false;
         allow delete: if isValidHmacKey(phoneKey) && isValidAppRef(applicationRef) && isSuperAdmin();
       }
+    }
+
+    // -------------------------------------------------------------------------
+    // /adminConsoleGate/{gateId}
+    // One-time claimable scrypt password hash for /admin-console URL protection
+    // -------------------------------------------------------------------------
+    match /adminConsoleGate/{gateId} {
+      allow get: if gateId == 'primary';
+      allow list: if false;
+
+      allow create: if gateId == 'primary'
+        && isValidAdminConsoleGate(incoming())
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+
+      allow update: if gateId == 'primary'
+        && isSuperAdmin()
+        && isValidAdminConsoleGate(incoming())
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly(['passwordHash', 'updatedAt']);
+
+      allow delete: if false;
     }
   }
 }

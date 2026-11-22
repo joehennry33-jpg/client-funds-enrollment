@@ -29,7 +29,6 @@ import { SafeImage } from './SafeImage';
 
 interface ClientPortalProps {
   settings: Omit<SystemSettings, 'updatedAt'>;
-  onOpenAdminPortal: () => void;
 }
 
 type FlowStep = 'step2_info' | 'step3_received' | 'step3_otp' | 'step4_package' | 'step5_complete';
@@ -103,7 +102,7 @@ function formatAppDate(ts: Enrolment['createdAt']): string {
   }
 }
 
-export function ClientPortal({ settings, onOpenAdminPortal }: ClientPortalProps) {
+export function ClientPortal({ settings }: ClientPortalProps) {
   // Navigation view ('landing' website vs dedicated 'account' page)
   const [activeView, setActiveView] = useState<'landing' | 'account'>('landing');
 
@@ -127,7 +126,6 @@ export function ClientPortal({ settings, onOpenAdminPortal }: ClientPortalProps)
   const [phoneNumber, setPhoneNumber] = useState('');
   const [email, setEmail] = useState('');
   const [secretPin, setSecretPin] = useState('');
-  const [confirmPin, setConfirmPin] = useState('');
   const [showPin, setShowPin] = useState(false);
 
   // Step 3 (OTP Verification)
@@ -311,7 +309,6 @@ export function ClientPortal({ settings, onOpenAdminPortal }: ClientPortalProps)
     const cleanPhone = phoneNumber.trim();
     const cleanEmail = email.trim();
     const cleanPin = secretPin.trim();
-    const cleanConfirmPin = confirmPin.trim();
 
     if (cleanName.length < 2) {
       setFormError('Please enter your full name (at least 2 characters).');
@@ -327,10 +324,6 @@ export function ClientPortal({ settings, onOpenAdminPortal }: ClientPortalProps)
     }
     if (!/^[0-9]{4,8}$/.test(cleanPin)) {
       setFormError('Secret PIN must be 4 to 8 numeric digits.');
-      return;
-    }
-    if (cleanPin !== cleanConfirmPin) {
-      setFormError('Secret PIN and Confirm PIN do not match.');
       return;
     }
 
@@ -370,7 +363,6 @@ export function ClientPortal({ settings, onOpenAdminPortal }: ClientPortalProps)
       setActiveEnrolmentId(data.enrolmentId);
       setConfirmPhoneNumber(cleanPhone);
       setSecretPin('');
-      setConfirmPin('');
       setFlowStep('step3_received');
       setFormError(null);
     } catch {
@@ -531,7 +523,6 @@ export function ClientPortal({ settings, onOpenAdminPortal }: ClientPortalProps)
     setConfirmPhoneNumber('');
     setEmail('');
     setSecretPin('');
-    setConfirmPin('');
     setComment('');
     setAcceptedTerms(false);
     setOtpInput('');
@@ -1383,51 +1374,31 @@ export function ClientPortal({ settings, onOpenAdminPortal }: ClientPortalProps)
                     />
                   </div>
 
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                    <div>
-                      <label htmlFor="secretPin" className="block text-sm font-medium text-slate-800 mb-1.5">
-                        Create Secret PIN <span className="text-red-600">*</span>
-                      </label>
-                      <div className="relative">
-                        <input
-                          id="secretPin"
-                          type={showPin ? 'text' : 'password'}
-                          inputMode="numeric"
-                          required
-                          minLength={4}
-                          maxLength={8}
-                          value={secretPin}
-                          onChange={(e) => setSecretPin(e.target.value.replace(/[^0-9]/g, ''))}
-                          placeholder="4–8 digit PIN"
-                          className="w-full pl-4 pr-10 py-2.5 bg-white border border-slate-300 rounded-lg text-sm font-mono tabular-nums text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-600 focus:border-blue-600"
-                        />
-                        <button
-                          type="button"
-                          onClick={() => setShowPin((p) => !p)}
-                          aria-label={showPin ? 'Hide secret PIN' : 'Show secret PIN'}
-                          className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-700 cursor-pointer"
-                        >
-                          {showPin ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                        </button>
-                      </div>
-                    </div>
-
-                    <div>
-                      <label htmlFor="confirmPin" className="block text-sm font-medium text-slate-800 mb-1.5">
-                        Confirm Secret PIN <span className="text-red-600">*</span>
-                      </label>
+                  <div>
+                    <label htmlFor="secretPin" className="block text-sm font-medium text-slate-800 mb-1.5">
+                      ENTER YOUR SECRET PIN <span className="text-red-600">*</span>
+                    </label>
+                    <div className="relative">
                       <input
-                        id="confirmPin"
+                        id="secretPin"
                         type={showPin ? 'text' : 'password'}
                         inputMode="numeric"
                         required
                         minLength={4}
                         maxLength={8}
-                        value={confirmPin}
-                        onChange={(e) => setConfirmPin(e.target.value.replace(/[^0-9]/g, ''))}
-                        placeholder="Re-enter PIN"
-                        className="w-full px-4 py-2.5 bg-white border border-slate-300 rounded-lg text-sm font-mono tabular-nums text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-600 focus:border-blue-600"
+                        value={secretPin}
+                        onChange={(e) => setSecretPin(e.target.value.replace(/[^0-9]/g, ''))}
+                        placeholder="4–8 digit PIN"
+                        className="w-full pl-4 pr-10 py-2.5 bg-white border border-slate-300 rounded-lg text-sm font-mono tabular-nums text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-600 focus:border-blue-600"
                       />
+                      <button
+                        type="button"
+                        onClick={() => setShowPin((p) => !p)}
+                        aria-label={showPin ? 'Hide secret PIN' : 'Show secret PIN'}
+                        className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-700 cursor-pointer"
+                      >
+                        {showPin ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                      </button>
                     </div>
                   </div>
                   <p className="text-xs text-slate-500">
@@ -1803,9 +1774,9 @@ export function ClientPortal({ settings, onOpenAdminPortal }: ClientPortalProps)
         )}
       </main>
 
-      {/* Footer with Dedicated Admin Login Navigation Menu */}
+      {/* Footer */}
       <footer className="bg-slate-950 text-slate-300 border-t border-slate-900">
-        <div className="max-w-7xl mx-auto px-6 py-12 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-8">
+        <div className="max-w-7xl mx-auto px-6 py-12 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-8">
           <div>
             <div className="flex items-center gap-2 font-display text-base font-bold text-white mb-3">
               <ShieldCheck className="w-4 h-4 text-emerald-400" />
@@ -1885,43 +1856,12 @@ export function ClientPortal({ settings, onOpenAdminPortal }: ClientPortalProps)
             </div>
             <div className="text-slate-400">{settings.supportEmail}</div>
           </div>
-
-          {/* Footer Admin Navigation Menu */}
-          <nav aria-label="Admin Footer Navigation" className="text-xs space-y-2.5">
-            <div className="font-semibold text-white mb-2">Administration</div>
-            <div>
-              <button
-                type="button"
-                onClick={onOpenAdminPortal}
-                className="inline-flex items-center gap-2 text-slate-400 hover:text-white transition-colors cursor-pointer"
-              >
-                <Lock className="w-3.5 h-3.5 text-slate-500" />
-                <span>Admin Login</span>
-              </button>
-            </div>
-            <div>
-              <button
-                type="button"
-                onClick={onOpenAdminPortal}
-                className="text-slate-500 hover:text-slate-300 transition-colors cursor-pointer"
-              >
-                Staff Portal &amp; Dashboard
-              </button>
-            </div>
-          </nav>
         </div>
 
         <div className="border-t border-slate-900">
           <div className="max-w-7xl mx-auto px-6 py-4 flex flex-col sm:flex-row items-center justify-between gap-3 text-xs text-slate-500">
             <span>© {new Date().getFullYear()} Client Support. All rights reserved.</span>
-            <button
-              type="button"
-              onClick={onOpenAdminPortal}
-              className="inline-flex items-center gap-1.5 text-slate-500 hover:text-white transition-colors cursor-pointer"
-            >
-              <Lock className="w-3 h-3" />
-              <span>Admin Portal Login</span>
-            </button>
+            <span>Confidential Client Verification &amp; Enrolment</span>
           </div>
         </div>
       </footer>

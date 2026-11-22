@@ -941,5 +941,188 @@ export function createApiApp() {
     }
   });
 
+  // ---------------------------------------------------------------------------
+  // 6. Admin Console URL Password Gate (/admin-console)
+  // ---------------------------------------------------------------------------
+  const ADMIN_GATE_TTL_MS = 8 * 60 * 60 * 1000;
+  const ADMIN_GATE_WINDOW_MS = 5 * 60 * 1000;
+  const MAX_ADMIN_GATE_ATTEMPTS = 8;
+  const adminGateFailures = new Map<string, { count: number; resetAtMs: number }>();
+
+  function getClientKey(req: Request): string {
+    const forwarded = req.headers['x-forwarded-for'];
+    if (typeof forwarded === 'string' && forwarded.trim()) {
+      return forwarded.split(',')[0].trim();
+    }
+    return req.ip || 'unknown';
+  }
+
+  function issueAdminConsoleToken(): string {
+    return sealJson({
+      kind: 'admin_console_gate',
+      expMs: Date.now() + ADMIN_GATE_TTL_MS,
+    });
+  }
+
+  function verifyAdminConsoleToken(token: string): boolean {
+    if (!token) return false;
+    try {
+      const payload = unsealJson<{ kind?: string; expMs?: number }>(token);
+      return payload.kind === 'admin_console_gate' && typeof payload.expMs === 'number' && Date.now() < payload.expMs;
+    } catch {
+      return false;
+    }
+  }
+
+  app.get('/api/admin-console/status', async (_req: Request, res: Response) => {
+    try {
+      const envPassword = process.env.ADMIN_CONSOLE_PASSWORD?.trim() || '';
+      if (envPassword) {
+        res.status(200).json({ configured: true, mode: 'env' });
+        return;
+      }
+      const gateDoc = await getFirestoreDoc('adminConsoleGate/primary');
+      const hasHash = Boolean(gateDoc && readStr(gateDoc.fields, 'passwordHash'));
+      res.status(200).json({
+        configured: hasHash,
+        mode: hasHash ? 'claimed' : 'unset',
+      });
+    } catch (err) {
+      console.error('Admin console status error:', err);
+      res.status(500).json({ error: 'Unable to check Admin Console security status.' });
+    }
+  });
+
+  app.post('/api/admin-console/setup', async (req: Request, res: Response) => {
+    try {
+      const envPassword = process.env.ADMIN_CONSOLE_PASSWORD?.trim() || '';
+      if (envPassword) {
+        res.status(409).json({
+          error: 'Admin Console password is already configured via server environment.',
+        });
+        return;
+      }
+
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      const password = typeof body.password === 'string' ? body.password : '';
+      const confirmPassword = typeof body.confirmPassword === 'string' ? body.confirmPassword : '';
+
+      if (password.length < 8 || password.length > 128) {
+        res.status(400).json({
+          error: 'Password must be between 8 and 128 characters.',
+        });
+        return;
+      }
+      if (password !== confirmPassword) {
+        res.status(400).json({
+          error: 'Passwords do not match.',
+        });
+        return;
+      }
+
+      const existing = await getFirestoreDoc('adminConsoleGate/primary');
+      if (existing) {
+        res.status(409).json({
+          error: 'Admin Console password has already been set. Please enter the password to unlock.',
+        });
+        return;
+      }
+
+      const passwordHash = hashPin(password);
+      await commitFirestoreWrites([
+        {
+          currentDocument: { exists: false },
+          update: {
+            name: `${FIRESTORE_DOC_PREFIX}/adminConsoleGate/primary`,
+            fields: {
+              passwordHash: fsStr(passwordHash),
+            },
+          },
+          updateTransforms: [
+            { fieldPath: 'createdAt', setToServerValue: 'REQUEST_TIME' },
+            { fieldPath: 'updatedAt', setToServerValue: 'REQUEST_TIME' },
+          ],
+        },
+      ]);
+
+      const token = issueAdminConsoleToken();
+      res.status(201).json({ unlocked: true, token, mode: 'claimed' });
+    } catch (err) {
+      console.error('Admin console setup error:', err);
+      res.status(500).json({ error: 'Unable to save Admin Console password. Please try again.' });
+    }
+  });
+
+  app.post('/api/admin-console/unlock', async (req: Request, res: Response) => {
+    try {
+      const clientKey = getClientKey(req);
+      const now = Date.now();
+      const failureRecord = adminGateFailures.get(clientKey);
+      if (failureRecord && now < failureRecord.resetAtMs && failureRecord.count >= MAX_ADMIN_GATE_ATTEMPTS) {
+        const waitSec = Math.ceil((failureRecord.resetAtMs - now) / 1000);
+        res.status(429).json({
+          error: `Too many incorrect attempts. Please wait ${waitSec} seconds before trying again.`,
+        });
+        return;
+      }
+
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      const password = typeof body.password === 'string' ? body.password : '';
+      if (!password) {
+        res.status(400).json({ error: 'Enter the Admin Console password.' });
+        return;
+      }
+
+      const envPassword = process.env.ADMIN_CONSOLE_PASSWORD?.trim() || '';
+      let valid = false;
+
+      if (envPassword) {
+        valid = timingSafeStringEqual(password, envPassword);
+      } else {
+        const gateDoc = await getFirestoreDoc('adminConsoleGate/primary');
+        if (!gateDoc) {
+          res.status(409).json({
+            error: 'Admin Console password has not been configured yet.',
+            needsSetup: true,
+          });
+          return;
+        }
+        const storedHash = readStr(gateDoc.fields, 'passwordHash');
+        valid = Boolean(storedHash && verifyPinHash(password, storedHash));
+      }
+
+      if (!valid) {
+        const nextCount =
+          failureRecord && now < failureRecord.resetAtMs ? failureRecord.count + 1 : 1;
+        adminGateFailures.set(clientKey, {
+          count: nextCount,
+          resetAtMs:
+            failureRecord && now < failureRecord.resetAtMs
+              ? failureRecord.resetAtMs
+              : now + ADMIN_GATE_WINDOW_MS,
+        });
+        res.status(401).json({ error: 'Incorrect Admin Console password.' });
+        return;
+      }
+
+      adminGateFailures.delete(clientKey);
+      const token = issueAdminConsoleToken();
+      res.status(200).json({ unlocked: true, token });
+    } catch (err) {
+      console.error('Admin console unlock error:', err);
+      res.status(500).json({ error: 'Unable to verify Admin Console password.' });
+    }
+  });
+
+  app.get('/api/admin-console/verify-session', (req: Request, res: Response) => {
+    const authHeader = req.headers.authorization || '';
+    const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
+    if (!verifyAdminConsoleToken(token)) {
+      res.status(401).json({ valid: false });
+      return;
+    }
+    res.status(200).json({ valid: true });
+  });
+
   return app;
 }

@@ -422,6 +422,28 @@
         }
       },
       "required": ["applicationRef", "enrolmentId", "sealedPinHash", "createdAt"]
+    },
+    "AdminConsoleGate": {
+      "title": "AdminConsoleGate",
+      "description": "One-time claimed scrypt password hash protecting access to the /admin-console URL",
+      "type": "object",
+      "properties": {
+        "passwordHash": {
+          "type": "string",
+          "minLength": 168,
+          "maxLength": 168,
+          "pattern": "^scrypt\\$[a-f0-9]{32}\\$[a-f0-9]{128}$"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["passwordHash", "createdAt", "updatedAt"]
     }
   },
   "firestore": {
@@ -456,6 +478,10 @@
     "/phoneAccounts/{phoneKey}/apps/{applicationRef}": {
       "schema": { "$ref": "#/entities/PhoneAccountApp" },
       "description": "HMAC-SHA256 keyed lookup entries for PIN-authenticated client account sign-in"
+    },
+    "/adminConsoleGate/{gateId}": {
+      "schema": { "$ref": "#/entities/AdminConsoleGate" },
+      "description": "Server-verified salted scrypt password gate for the /admin-console URL"
     }
   }
 }
