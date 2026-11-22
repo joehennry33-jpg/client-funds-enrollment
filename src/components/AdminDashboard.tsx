@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import {
   BarChart3,
   Bell,
+  Check,
   CheckCircle2,
   ClipboardList,
   Clock,
@@ -15,7 +16,6 @@ import {
   Pencil,
   Plus,
   Search,
-  Send,
   Settings,
   Shield,
   ShieldCheck,
@@ -35,7 +35,6 @@ import {
   serverTimestamp,
   setDoc,
   updateDoc,
-  writeBatch,
 } from 'firebase/firestore';
 import { db, handleFirestoreError, OperationType, signOutUser } from '../firebase';
 import type {
@@ -86,10 +85,6 @@ function formatDateTime(ts: Enrolment['createdAt']): string {
   }
 }
 
-function generateSixDigitOtp(): string {
-  return Math.floor(100000 + Math.random() * 900000).toString();
-}
-
 export function AdminDashboard({ user, role, settings, onBackToWebsite }: AdminDashboardProps) {
   const [activeTab, setActiveTab] = useState<AdminTab>('dashboard');
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
@@ -114,22 +109,19 @@ export function AdminDashboard({ user, role, settings, onBackToWebsite }: AdminD
 
   // Search & filters
   const [clientSearch, setClientSearch] = useState('');
-  const [submissionFilter, setSubmissionFilter] = useState<'all' | 'final' | 'awaiting_otp' | 'stage1'>('all');
+  const [submissionFilter, setSubmissionFilter] = useState<'all' | 'final' | 'otp_verified' | 'stage1'>('all');
 
-  // Modals
+  // Modals (Admins never view PIN hashes or generate/issue/send OTPs)
   const [editingClient, setEditingClient] = useState<Enrolment | null>(null);
   const [editForm, setEditForm] = useState({
     fullName: '',
     phoneNumber: '',
     packageAmount: settings.tier1Amount,
-    otpCode: '',
     status: 'Pending' as EnrolmentStatus,
     accountStatus: 'Active' as AccountStatus,
     comment: '',
   });
   const [deletingClient, setDeletingClient] = useState<Enrolment | null>(null);
-  const [otpDispatchTarget, setOtpDispatchTarget] = useState<OtpRequest | null>(null);
-  const [otpCodeToSend, setOtpCodeToSend] = useState('');
 
   // Manage Users (RBAC) state
   const [newStaffEmail, setNewStaffEmail] = useState('');
@@ -226,7 +218,7 @@ export function AdminDashboard({ user, role, settings, onBackToWebsite }: AdminD
   );
 
   const secondFormSubmissions = useMemo(
-    () => enrolments.filter((e) => e.stage === 'awaiting_otp' || e.stage === 'final_submitted'),
+    () => enrolments.filter((e) => e.stage === 'final_submitted'),
     [enrolments]
   );
 
@@ -237,6 +229,7 @@ export function AdminDashboard({ user, role, settings, onBackToWebsite }: AdminD
       (e) =>
         e.fullName.toLowerCase().includes(q) ||
         e.phoneNumber.toLowerCase().includes(q) ||
+        (e.applicationRef || '').toLowerCase().includes(q) ||
         e.email.toLowerCase().includes(q)
     );
   }, [enrolments, clientSearch]);
@@ -245,8 +238,8 @@ export function AdminDashboard({ user, role, settings, onBackToWebsite }: AdminD
     if (submissionFilter === 'final') {
       return enrolments.filter((e) => e.stage === 'final_submitted');
     }
-    if (submissionFilter === 'awaiting_otp') {
-      return enrolments.filter((e) => e.stage === 'awaiting_otp');
+    if (submissionFilter === 'otp_verified') {
+      return enrolments.filter((e) => e.stage === 'otp_verified');
     }
     if (submissionFilter === 'stage1') {
       return enrolments.filter((e) => e.stage === 'stage1_submitted');
@@ -279,7 +272,6 @@ export function AdminDashboard({ user, role, settings, onBackToWebsite }: AdminD
       fullName: client.fullName,
       phoneNumber: client.phoneNumber,
       packageAmount: client.packageAmount || settings.tier1Amount,
-      otpCode: client.otpCode || '',
       status: client.status,
       accountStatus: client.accountStatus,
       comment: client.comment || '',
@@ -290,12 +282,6 @@ export function AdminDashboard({ user, role, settings, onBackToWebsite }: AdminD
     e.preventDefault();
     if (!editingClient) return;
 
-    const cleanOtp = editForm.otpCode.trim();
-    if (cleanOtp !== '' && !/^[0-9]{6}$/.test(cleanOtp)) {
-      showBanner('error', 'OTP code must be empty or exactly 6 numeric digits.');
-      return;
-    }
-
     setActionBusy(true);
     try {
       const payload = canVerify
@@ -304,14 +290,12 @@ export function AdminDashboard({ user, role, settings, onBackToWebsite }: AdminD
             phoneNumber: editForm.phoneNumber.trim().slice(0, 20),
             packageAmount: Number(editForm.packageAmount) || 0,
             packageLabel: `KES ${(Number(editForm.packageAmount) || 0).toLocaleString()}`,
-            otpCode: cleanOtp,
             status: editForm.status,
             accountStatus: editForm.accountStatus,
             comment: editForm.comment.trim().slice(0, 500),
             updatedAt: serverTimestamp(),
           }
         : {
-            otpCode: cleanOtp,
             comment: editForm.comment.trim().slice(0, 500),
             updatedAt: serverTimestamp(),
           };
@@ -340,39 +324,16 @@ export function AdminDashboard({ user, role, settings, onBackToWebsite }: AdminD
     }
   };
 
-  const openOtpDispatchModal = (req: OtpRequest) => {
-    setOtpDispatchTarget(req);
-    setOtpCodeToSend(generateSixDigitOtp());
-  };
-
-  const handleSendOtp = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!otpDispatchTarget) return;
-    const code = otpCodeToSend.trim();
-    if (!/^[0-9]{6}$/.test(code)) {
-      showBanner('error', 'OTP must be exactly 6 numeric digits.');
-      return;
-    }
-
+  const handleAcknowledgeOtpRequest = async (req: OtpRequest) => {
     setActionBusy(true);
     try {
-      const batch = writeBatch(db);
-      batch.update(doc(db, 'otpRequests', otpDispatchTarget.id), {
-        status: 'Sent',
-        dispatchedOtp: code,
-        sentByEmail: user.email || '',
+      await updateDoc(doc(db, 'otpRequests', req.id), {
+        status: 'Acknowledged',
         updatedAt: serverTimestamp(),
       });
-      batch.update(doc(db, 'enrolments', otpDispatchTarget.enrolmentId), {
-        otpCode: code,
-        otpResendRequested: false,
-        updatedAt: serverTimestamp(),
-      });
-      await batch.commit();
-      showBanner('success', `Dispatched OTP ${code} to ${otpDispatchTarget.clientName}.`);
-      setOtpDispatchTarget(null);
+      showBanner('success', `Acknowledged resend notification for ${req.clientName} (${req.applicationRef}).`);
     } catch (err) {
-      handleFirestoreError(err, OperationType.WRITE, `otpRequests/${otpDispatchTarget.id}`);
+      handleFirestoreError(err, OperationType.UPDATE, `otpRequests/${req.id}`);
     } finally {
       setActionBusy(false);
     }
@@ -459,14 +420,26 @@ export function AdminDashboard({ user, role, settings, onBackToWebsite }: AdminD
   };
 
   const handleExportCsv = () => {
-    const headers = ['Full Name', 'Phone Number', 'Email', 'Package', 'Intention', 'OTP', 'Status', 'Comment', 'Date'];
+    const headers = [
+      'Application Ref',
+      'Full Name',
+      'Phone Number',
+      'Email',
+      'Package',
+      'Intention',
+      'OTP Verified',
+      'Status',
+      'Comment',
+      'Date',
+    ];
     const rows = filteredSubmissions.map((e) => [
+      `"${e.applicationRef || '—'}"`,
       `"${e.fullName.replace(/"/g, '""')}"`,
       `"${e.phoneNumber}"`,
       `"${e.email}"`,
       `"${e.packageLabel || 'N/A'}"`,
       `"${e.intention || 'N/A'}"`,
-      `"${e.otpCode}"`,
+      `"${e.otpVerified ? 'Verified' : 'Pending'}"`,
       `"${e.status}"`,
       `"${(e.comment || '').replace(/"/g, '""')}"`,
       `"${formatDateTime(e.createdAt)}"`,
@@ -726,6 +699,7 @@ export function AdminDashboard({ user, role, settings, onBackToWebsite }: AdminD
                       <thead>
                         <tr className="border-b border-slate-200 bg-slate-50 text-xs font-semibold text-slate-600">
                           <th className="py-2.5 px-4">#</th>
+                          <th className="py-2.5 px-4">App Ref</th>
                           <th className="py-2.5 px-4">Name</th>
                           <th className="py-2.5 px-4">Phone Number</th>
                           <th className="py-2.5 px-4">Package</th>
@@ -736,13 +710,13 @@ export function AdminDashboard({ user, role, settings, onBackToWebsite }: AdminD
                       <tbody className="divide-y divide-slate-100 text-xs">
                         {loadingData ? (
                           <tr>
-                            <td colSpan={6} className="py-6 px-4 text-center text-slate-500">
+                            <td colSpan={7} className="py-6 px-4 text-center text-slate-500">
                               Loading client records...
                             </td>
                           </tr>
                         ) : enrolments.length === 0 ? (
                           <tr>
-                            <td colSpan={6} className="py-6 px-4 text-center text-slate-500">
+                            <td colSpan={7} className="py-6 px-4 text-center text-slate-500">
                               No clients enrolled yet.
                             </td>
                           </tr>
@@ -751,6 +725,9 @@ export function AdminDashboard({ user, role, settings, onBackToWebsite }: AdminD
                             <tr key={client.id} className="hover:bg-slate-50">
                               <td className="py-2.5 px-4 font-mono tabular-nums text-slate-500">
                                 {idx + 1}
+                              </td>
+                              <td className="py-2.5 px-4 font-mono text-slate-700">
+                                {client.applicationRef || '—'}
                               </td>
                               <td className="py-2.5 px-4 font-semibold text-slate-900">
                                 {client.fullName}
@@ -785,7 +762,7 @@ export function AdminDashboard({ user, role, settings, onBackToWebsite }: AdminD
                   </div>
                 </section>
 
-                {/* OTP Notifications */}
+                {/* OTP Resend Notifications (Admin Panel Only — No OTP generation/sending) */}
                 <section className="xl:col-span-5 bg-white border border-slate-200 rounded-xl overflow-hidden">
                   <div className="bg-red-700 text-white px-5 py-3.5 flex items-center justify-between">
                     <div className="flex items-center gap-2.5 font-display text-sm font-bold">
@@ -806,17 +783,17 @@ export function AdminDashboard({ user, role, settings, onBackToWebsite }: AdminD
                   <div className="p-4 space-y-3">
                     <div className="px-3.5 py-2.5 rounded-lg bg-red-50 border border-red-200 text-xs font-medium text-red-800">
                       {pendingOtpList.length > 0
-                        ? 'Clients requested to resend OTP code'
+                        ? 'Clients requested an OTP resend (handled via external process)'
                         : 'No pending OTP resend requests'}
                     </div>
                     <div className="overflow-x-auto">
                       <table className="w-full text-left border-collapse">
                         <thead>
                           <tr className="border-b border-slate-200 text-xs font-semibold text-slate-600">
-                            <th className="py-2 px-2">#</th>
                             <th className="py-2 px-2">Client Name</th>
-                            <th className="py-2 px-2">Phone Number</th>
-                            <th className="py-2 px-2">Time</th>
+                            <th className="py-2 px-2">Phone</th>
+                            <th className="py-2 px-2">App Ref</th>
+                            <th className="py-2 px-2">Request Time</th>
                             <th className="py-2 px-2 text-right">Action</th>
                           </tr>
                         </thead>
@@ -828,16 +805,16 @@ export function AdminDashboard({ user, role, settings, onBackToWebsite }: AdminD
                               </td>
                             </tr>
                           ) : (
-                            pendingOtpList.slice(0, 4).map((req, idx) => (
+                            pendingOtpList.slice(0, 4).map((req) => (
                               <tr key={req.id}>
-                                <td className="py-2.5 px-2 font-mono tabular-nums text-slate-500">
-                                  {idx + 1}
-                                </td>
                                 <td className="py-2.5 px-2 font-semibold text-slate-900">
                                   {req.clientName}
                                 </td>
                                 <td className="py-2.5 px-2 font-mono tabular-nums text-slate-600">
                                   {req.phoneNumber}
+                                </td>
+                                <td className="py-2.5 px-2 font-mono text-slate-700">
+                                  {req.applicationRef}
                                 </td>
                                 <td className="py-2.5 px-2 font-mono tabular-nums text-slate-500">
                                   {formatDateTime(req.createdAt)}
@@ -845,10 +822,11 @@ export function AdminDashboard({ user, role, settings, onBackToWebsite }: AdminD
                                 <td className="py-2.5 px-2 text-right">
                                   <button
                                     type="button"
-                                    onClick={() => openOtpDispatchModal(req)}
-                                    className="px-3 py-1 bg-blue-700 hover:bg-blue-800 text-white text-xs font-semibold rounded-md transition-colors cursor-pointer whitespace-nowrap"
+                                    disabled={actionBusy}
+                                    onClick={() => void handleAcknowledgeOtpRequest(req)}
+                                    className="px-2.5 py-1 bg-slate-800 hover:bg-slate-900 text-white text-xs font-semibold rounded-md transition-colors cursor-pointer whitespace-nowrap disabled:opacity-50"
                                   >
-                                    Send OTP
+                                    Acknowledge
                                   </button>
                                 </td>
                               </tr>
@@ -882,12 +860,12 @@ export function AdminDashboard({ user, role, settings, onBackToWebsite }: AdminD
                     <table className="w-full text-left border-collapse">
                       <thead>
                         <tr className="border-b border-slate-200 bg-slate-50 text-xs font-semibold text-slate-600">
-                          <th className="py-2.5 px-3">#</th>
+                          <th className="py-2.5 px-3">App Ref</th>
                           <th className="py-2.5 px-3">Client Name</th>
                           <th className="py-2.5 px-3">Price</th>
                           <th className="py-2.5 px-3">Intention</th>
                           <th className="py-2.5 px-3">Phone No.</th>
-                          <th className="py-2.5 px-3">OTP</th>
+                          <th className="py-2.5 px-3">Verification</th>
                           <th className="py-2.5 px-3">Comment</th>
                           <th className="py-2.5 px-3">Date</th>
                         </tr>
@@ -900,10 +878,10 @@ export function AdminDashboard({ user, role, settings, onBackToWebsite }: AdminD
                             </td>
                           </tr>
                         ) : (
-                          secondFormSubmissions.slice(0, 5).map((sub, idx) => (
+                          secondFormSubmissions.slice(0, 5).map((sub) => (
                             <tr key={sub.id} className="hover:bg-slate-50">
-                              <td className="py-2.5 px-3 font-mono tabular-nums text-slate-500">
-                                {idx + 1}
+                              <td className="py-2.5 px-3 font-mono text-slate-600">
+                                {sub.applicationRef || '—'}
                               </td>
                               <td className="py-2.5 px-3 font-semibold text-slate-900">
                                 {sub.fullName}
@@ -915,8 +893,16 @@ export function AdminDashboard({ user, role, settings, onBackToWebsite }: AdminD
                               <td className="py-2.5 px-3 font-mono tabular-nums text-slate-600">
                                 {sub.phoneNumber}
                               </td>
-                              <td className="py-2.5 px-3 font-mono tabular-nums text-slate-800">
-                                {sub.otpCode || <span className="text-slate-400 font-sans">Pending OTP</span>}
+                              <td className="py-2.5 px-3">
+                                <span
+                                  className={`inline-block px-2 py-0.5 rounded font-semibold ${
+                                    sub.otpVerified
+                                      ? 'bg-emerald-100 text-emerald-800'
+                                      : 'bg-amber-100 text-amber-800'
+                                  }`}
+                                >
+                                  {sub.otpVerified ? 'OTP Verified' : 'Pending'}
+                                </span>
                               </td>
                               <td className="py-2.5 px-3 text-slate-600 max-w-[140px] truncate">
                                 {sub.comment || '—'}
@@ -946,7 +932,7 @@ export function AdminDashboard({ user, role, settings, onBackToWebsite }: AdminD
                           type="text"
                           value={clientSearch}
                           onChange={(e) => setClientSearch(e.target.value)}
-                          placeholder="Search client by name or phone..."
+                          placeholder="Search by name, phone, or APP ref..."
                           className="w-full pl-9 pr-3 py-2 border border-slate-300 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-blue-600"
                         />
                       </div>
@@ -1041,7 +1027,7 @@ export function AdminDashboard({ user, role, settings, onBackToWebsite }: AdminD
                 <div>
                   <h2 className="font-display text-lg font-bold text-slate-900">Clients Accounts</h2>
                   <p className="text-xs text-slate-500">
-                    Search, verify, update, or suspend enrolled client accounts.
+                    Search, verify, update, or suspend enrolled client accounts. Client PINs are hashed and never displayed.
                   </p>
                 </div>
                 <div className="relative w-full sm:w-72">
@@ -1050,7 +1036,7 @@ export function AdminDashboard({ user, role, settings, onBackToWebsite }: AdminD
                     type="text"
                     value={clientSearch}
                     onChange={(e) => setClientSearch(e.target.value)}
-                    placeholder="Filter by name, phone, email..."
+                    placeholder="Filter by name, phone, APP ref..."
                     className="w-full pl-9 pr-3 py-2 border border-slate-300 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-blue-600"
                   />
                 </div>
@@ -1060,10 +1046,12 @@ export function AdminDashboard({ user, role, settings, onBackToWebsite }: AdminD
                   <thead>
                     <tr className="border-b border-slate-200 bg-slate-50 text-xs font-semibold text-slate-600">
                       <th className="py-3 px-4">#</th>
+                      <th className="py-3 px-4">App Ref</th>
                       <th className="py-3 px-4">Full Name</th>
                       <th className="py-3 px-4">Phone</th>
                       <th className="py-3 px-4">Email</th>
                       <th className="py-3 px-4">Package</th>
+                      <th className="py-3 px-4">OTP</th>
                       <th className="py-3 px-4">Verification</th>
                       <th className="py-3 px-4">Account</th>
                       <th className="py-3 px-4">Date</th>
@@ -1074,6 +1062,7 @@ export function AdminDashboard({ user, role, settings, onBackToWebsite }: AdminD
                     {filteredClients.map((c, idx) => (
                       <tr key={c.id} className="hover:bg-slate-50">
                         <td className="py-3 px-4 font-mono tabular-nums text-slate-500">{idx + 1}</td>
+                        <td className="py-3 px-4 font-mono text-slate-700">{c.applicationRef || '—'}</td>
                         <td className="py-3 px-4 font-semibold text-slate-900">{c.fullName}</td>
                         <td className="py-3 px-4 font-mono tabular-nums text-slate-600">
                           {c.phoneNumber}
@@ -1081,6 +1070,19 @@ export function AdminDashboard({ user, role, settings, onBackToWebsite }: AdminD
                         <td className="py-3 px-4 text-slate-600">{c.email || '—'}</td>
                         <td className="py-3 px-4 font-mono tabular-nums text-slate-800">
                           {c.packageLabel || '—'}
+                        </td>
+                        <td className="py-3 px-4">
+                          <span
+                            className={`px-2 py-0.5 rounded font-semibold ${
+                              c.otpVerified
+                                ? 'bg-emerald-100 text-emerald-800'
+                                : c.otpIssued
+                                  ? 'bg-blue-100 text-blue-800'
+                                  : 'bg-slate-100 text-slate-600'
+                            }`}
+                          >
+                            {c.otpVerified ? 'Verified' : c.otpIssued ? 'Issued' : 'Not Issued'}
+                          </span>
                         </td>
                         <td className="py-3 px-4">
                           <span
@@ -1144,16 +1146,16 @@ export function AdminDashboard({ user, role, settings, onBackToWebsite }: AdminD
                 <div>
                   <h2 className="font-display text-lg font-bold text-slate-900">Form Submissions</h2>
                   <p className="text-xs text-slate-500">
-                    Complete audit trail of 1st-form and 2nd-form client submissions.
+                    Complete audit trail of client registrations, OTP verification, and second-form submissions.
                   </p>
                 </div>
                 <div className="flex flex-wrap items-center gap-2">
                   <div className="flex items-center gap-1 p-1 bg-slate-100 rounded-lg">
                     {[
                       { id: 'all', label: 'All' },
-                      { id: 'final', label: 'Final Submitted' },
-                      { id: 'awaiting_otp', label: 'Awaiting OTP' },
-                      { id: 'stage1', label: '1st Form Only' },
+                      { id: 'final', label: 'Second Form Submitted' },
+                      { id: 'otp_verified', label: 'OTP Verified' },
+                      { id: 'stage1', label: 'Registered Only' },
                     ].map((f) => (
                       <button
                         key={f.id}
@@ -1183,21 +1185,21 @@ export function AdminDashboard({ user, role, settings, onBackToWebsite }: AdminD
                 <table className="w-full text-left border-collapse">
                   <thead>
                     <tr className="border-b border-slate-200 bg-slate-50 text-xs font-semibold text-slate-600">
-                      <th className="py-3 px-4">#</th>
+                      <th className="py-3 px-4">App Ref</th>
                       <th className="py-3 px-4">Client Name</th>
                       <th className="py-3 px-4">Price</th>
                       <th className="py-3 px-4">Intention</th>
-                      <th className="py-3 px-4">Phone No.</th>
-                      <th className="py-3 px-4">OTP</th>
+                      <th className="py-3 px-4">Mobile No.</th>
+                      <th className="py-3 px-4">Verification Status</th>
                       <th className="py-3 px-4">Stage</th>
                       <th className="py-3 px-4">Comment</th>
                       <th className="py-3 px-4">Date</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100 text-xs">
-                    {filteredSubmissions.map((sub, idx) => (
+                    {filteredSubmissions.map((sub) => (
                       <tr key={sub.id} className="hover:bg-slate-50">
-                        <td className="py-3 px-4 font-mono tabular-nums text-slate-500">{idx + 1}</td>
+                        <td className="py-3 px-4 font-mono text-slate-700">{sub.applicationRef || '—'}</td>
                         <td className="py-3 px-4 font-semibold text-slate-900">{sub.fullName}</td>
                         <td className="py-3 px-4 font-mono tabular-nums text-slate-800">
                           {sub.packageLabel || '—'}
@@ -1206,15 +1208,23 @@ export function AdminDashboard({ user, role, settings, onBackToWebsite }: AdminD
                         <td className="py-3 px-4 font-mono tabular-nums text-slate-600">
                           {sub.phoneNumber}
                         </td>
-                        <td className="py-3 px-4 font-mono tabular-nums text-slate-800">
-                          {sub.otpCode || <span className="text-slate-400 font-sans">Pending OTP</span>}
+                        <td className="py-3 px-4">
+                          <span
+                            className={`px-2 py-0.5 rounded font-semibold ${
+                              sub.otpVerified
+                                ? 'bg-emerald-100 text-emerald-800'
+                                : 'bg-amber-100 text-amber-800'
+                            }`}
+                          >
+                            {sub.otpVerified ? 'OTP Verified' : 'Pending OTP'}
+                          </span>
                         </td>
                         <td className="py-3 px-4 text-slate-600">
                           {sub.stage === 'final_submitted'
                             ? 'Final Submitted'
-                            : sub.stage === 'awaiting_otp'
-                              ? 'Awaiting OTP'
-                              : '1st Form'}
+                            : sub.stage === 'otp_verified'
+                              ? 'OTP Verified'
+                              : 'Registered'}
                         </td>
                         <td className="py-3 px-4 text-slate-600 max-w-xs truncate">
                           {sub.comment || '—'}
@@ -1239,7 +1249,7 @@ export function AdminDashboard({ user, role, settings, onBackToWebsite }: AdminD
                     OTP Resend Notifications
                   </h2>
                   <p className="text-xs text-slate-500">
-                    Dispatch fresh 6-digit verification codes to clients who clicked Resend Code.
+                    Notifications submitted by clients requesting an OTP resend. OTP codes are issued strictly via the external verification process and never generated or sent from this panel.
                   </p>
                 </div>
               </div>
@@ -1250,17 +1260,16 @@ export function AdminDashboard({ user, role, settings, onBackToWebsite }: AdminD
                       <th className="py-3 px-4">#</th>
                       <th className="py-3 px-4">Client Name</th>
                       <th className="py-3 px-4">Phone Number</th>
+                      <th className="py-3 px-4">Application Reference</th>
+                      <th className="py-3 px-4">Request Time</th>
                       <th className="py-3 px-4">Status</th>
-                      <th className="py-3 px-4">Dispatched OTP</th>
-                      <th className="py-3 px-4">Handled By</th>
-                      <th className="py-3 px-4">Requested At</th>
                       <th className="py-3 px-4 text-right">Action</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100 text-xs">
                     {otpRequests.length === 0 ? (
                       <tr>
-                        <td colSpan={8} className="py-8 text-center text-slate-500">
+                        <td colSpan={7} className="py-8 text-center text-slate-500">
                           No OTP resend notifications logged.
                         </td>
                       </tr>
@@ -1276,6 +1285,12 @@ export function AdminDashboard({ user, role, settings, onBackToWebsite }: AdminD
                           <td className="py-3 px-4 font-mono tabular-nums text-slate-600">
                             {req.phoneNumber}
                           </td>
+                          <td className="py-3 px-4 font-mono text-slate-800">
+                            {req.applicationRef}
+                          </td>
+                          <td className="py-3 px-4 font-mono tabular-nums text-slate-500">
+                            {formatDateTime(req.createdAt)}
+                          </td>
                           <td className="py-3 px-4">
                             <span
                               className={`px-2 py-0.5 rounded font-semibold ${
@@ -1287,25 +1302,19 @@ export function AdminDashboard({ user, role, settings, onBackToWebsite }: AdminD
                               {req.status}
                             </span>
                           </td>
-                          <td className="py-3 px-4 font-mono tabular-nums text-slate-800">
-                            {req.dispatchedOtp || '—'}
-                          </td>
-                          <td className="py-3 px-4 text-slate-600">{req.sentByEmail || '—'}</td>
-                          <td className="py-3 px-4 font-mono tabular-nums text-slate-500">
-                            {formatDateTime(req.createdAt)}
-                          </td>
                           <td className="py-3 px-4 text-right">
                             {req.status === 'Pending' ? (
                               <button
                                 type="button"
-                                onClick={() => openOtpDispatchModal(req)}
-                                className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-blue-700 hover:bg-blue-800 text-white font-semibold rounded-md cursor-pointer"
+                                disabled={actionBusy}
+                                onClick={() => void handleAcknowledgeOtpRequest(req)}
+                                className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-slate-800 hover:bg-slate-900 text-white font-semibold rounded-md cursor-pointer disabled:opacity-50"
                               >
-                                <Send className="w-3 h-3" />
-                                Send OTP
+                                <Check className="w-3 h-3" />
+                                Acknowledge
                               </button>
                             ) : (
-                              <span className="text-slate-400">Sent</span>
+                              <span className="text-slate-400">Acknowledged</span>
                             )}
                           </td>
                         </tr>
@@ -1613,7 +1622,7 @@ export function AdminDashboard({ user, role, settings, onBackToWebsite }: AdminD
           )}
         </main>
 
-        {/* Admin Bottom Footer Bar (Matching Image 2) */}
+        {/* Admin Bottom Footer Bar */}
         <footer className="bg-[#0B2447] text-slate-200 px-6 py-3 flex flex-col sm:flex-row items-center justify-between gap-2 text-xs">
           <div>
             <span className="font-semibold text-white">Client Enrolment System</span> · Secure ·
@@ -1626,12 +1635,18 @@ export function AdminDashboard({ user, role, settings, onBackToWebsite }: AdminD
         </footer>
       </div>
 
-      {/* Edit Client Modal */}
+      {/* Edit Client Modal (No PIN visibility, No OTP generation/editing) */}
       {editingClient && (
         <div className="fixed inset-0 z-50 bg-slate-950/60 flex items-center justify-center p-4">
           <div className="bg-white border border-slate-200 rounded-xl max-w-md w-full p-6 shadow-xl">
             <div className="flex items-center justify-between mb-4">
-              <h3 className="font-display text-lg font-bold text-slate-900">Edit Client Record</h3>
+              <div>
+                <h3 className="font-display text-lg font-bold text-slate-900">Edit Client Record</h3>
+                <p className="text-xs font-mono text-slate-500">
+                  Ref: {editingClient.applicationRef || '—'} · OTP:{' '}
+                  {editingClient.otpVerified ? 'Verified' : 'Pending'}
+                </p>
+              </div>
               <button
                 type="button"
                 onClick={() => setEditingClient(null)}
@@ -1721,30 +1736,6 @@ export function AdminDashboard({ user, role, settings, onBackToWebsite }: AdminD
                 </>
               )}
               <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1">
-                  OTP Code (6 digits, optional)
-                </label>
-                <div className="flex gap-2">
-                  <input
-                    type="text"
-                    maxLength={6}
-                    value={editForm.otpCode}
-                    onChange={(e) =>
-                      setEditForm((p) => ({ ...p, otpCode: e.target.value.replace(/[^0-9]/g, '') }))
-                    }
-                    placeholder="Not dispatched yet"
-                    className="flex-1 px-3 py-2 border border-slate-300 rounded-lg text-sm font-mono tabular-nums"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => setEditForm((p) => ({ ...p, otpCode: generateSixDigitOtp() }))}
-                    className="px-3 py-2 text-xs font-semibold border border-slate-300 rounded-lg hover:bg-slate-50 cursor-pointer"
-                  >
-                    Generate
-                  </button>
-                </div>
-              </div>
-              <div>
                 <label className="block text-xs font-semibold text-slate-700 mb-1">Comment</label>
                 <textarea
                   rows={2}
@@ -1767,68 +1758,6 @@ export function AdminDashboard({ user, role, settings, onBackToWebsite }: AdminD
                   className="px-5 py-2 bg-blue-700 hover:bg-blue-800 text-white text-xs font-semibold rounded-lg cursor-pointer disabled:opacity-60"
                 >
                   Save Changes
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
-
-      {/* Send OTP Modal */}
-      {otpDispatchTarget && (
-        <div className="fixed inset-0 z-50 bg-slate-950/60 flex items-center justify-center p-4">
-          <div className="bg-white border border-slate-200 rounded-xl max-w-sm w-full p-6 shadow-xl">
-            <div className="flex items-center justify-between mb-3">
-              <h3 className="font-display text-lg font-bold text-slate-900">Send OTP Code</h3>
-              <button
-                type="button"
-                onClick={() => setOtpDispatchTarget(null)}
-                className="p-1 text-slate-400 hover:text-slate-700 cursor-pointer"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-            <p className="text-xs text-slate-600 mb-4">
-              Dispatch a fresh 6-digit OTP to <span className="font-semibold">{otpDispatchTarget.clientName}</span> (
-              <span className="font-mono">{otpDispatchTarget.phoneNumber}</span>).
-            </p>
-            <form onSubmit={handleSendOtp} className="space-y-4">
-              <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1">
-                  6-Digit OTP Code
-                </label>
-                <div className="flex gap-2">
-                  <input
-                    type="text"
-                    maxLength={6}
-                    value={otpCodeToSend}
-                    onChange={(e) => setOtpCodeToSend(e.target.value.replace(/[^0-9]/g, ''))}
-                    className="flex-1 px-3.5 py-2 border border-slate-300 rounded-lg font-mono text-lg tracking-widest tabular-nums"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => setOtpCodeToSend(generateSixDigitOtp())}
-                    className="px-3 py-2 text-xs font-semibold border border-slate-300 rounded-lg hover:bg-slate-50 cursor-pointer"
-                  >
-                    Regenerate
-                  </button>
-                </div>
-              </div>
-              <div className="flex justify-end gap-2">
-                <button
-                  type="button"
-                  onClick={() => setOtpDispatchTarget(null)}
-                  className="px-4 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-100 rounded-lg cursor-pointer"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  disabled={actionBusy}
-                  className="inline-flex items-center gap-1.5 px-5 py-2 bg-blue-700 hover:bg-blue-800 text-white text-xs font-semibold rounded-lg cursor-pointer"
-                >
-                  <Send className="w-3.5 h-3.5" />
-                  Send OTP
                 </button>
               </div>
             </form>

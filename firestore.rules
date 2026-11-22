@@ -22,6 +22,10 @@ service cloud.firestore {
       return isValidId(id) && id.size() >= 24;
     }
 
+    function isValidAppRef(ref) {
+      return ref is string && ref.size() == 10 && ref.matches('^APP-[A-Z0-9]{6}$');
+    }
+
     function isValidEmailKey(emailKey) {
       return emailKey is string && emailKey.size() >= 5 && emailKey.size() <= 150 && emailKey.matches('^[a-z0-9._%+\\-]+@[a-z0-9.\\-]+\\.[a-z]{2,}$');
     }
@@ -62,18 +66,15 @@ service cloud.firestore {
       return get(/databases/$(database)/documents/staffAccess/$(request.auth.token.email.lower())).data;
     }
 
-    // Any active staff role (support_agent, verification_officer, super_admin, or bootstrap owner)
     function isAdmin() {
       return isBootstrapOwner() || (hasStaffDoc() && staffData().active == true);
     }
 
-    // Can verify/reject client enrolments & manage client accounts
     function isVerifier() {
       return isBootstrapOwner()
         || (hasStaffDoc() && staffData().active == true && staffData().role in ['super_admin', 'verification_officer']);
     }
 
-    // Full administrative control (manage staff roles, delete records, update system settings)
     function isSuperAdmin() {
       return isBootstrapOwner()
         || (hasStaffDoc() && staffData().active == true && staffData().role == 'super_admin');
@@ -96,54 +97,98 @@ service cloud.firestore {
 
     function isValidEnrolment(data) {
       return data.keys().hasAll([
-          'ownerId', 'fullName', 'phoneNumber', 'email',
-          'packageAmount', 'packageLabel', 'acceptedTerms',
-          'intention', 'comment', 'otpCode', 'otpVerified',
-          'otpResendRequested', 'stage', 'status', 'accountStatus',
-          'createdAt', 'updatedAt'
+          'ownerId', 'applicationRef', 'fullName', 'phoneNumber', 'email', 'hasPin',
+          'packageAmount', 'packageLabel', 'acceptedTerms', 'intention', 'comment',
+          'otpIssued', 'otpIssuedAt', 'otpExpiresAt', 'otpAttempts', 'otpUsed',
+          'otpVerified', 'otpVerifiedAt', 'otpResendRequested', 'lastResendRequestedAt',
+          'stage', 'status', 'accountStatus', 'createdAt', 'updatedAt'
         ])
         && data.keys().hasOnly([
-          'ownerId', 'fullName', 'phoneNumber', 'email',
-          'packageAmount', 'packageLabel', 'acceptedTerms',
-          'intention', 'comment', 'otpCode', 'otpVerified',
-          'otpResendRequested', 'stage', 'status', 'accountStatus',
-          'createdAt', 'updatedAt'
+          'ownerId', 'applicationRef', 'fullName', 'phoneNumber', 'email', 'hasPin',
+          'packageAmount', 'packageLabel', 'acceptedTerms', 'intention', 'comment',
+          'otpIssued', 'otpIssuedAt', 'otpExpiresAt', 'otpAttempts', 'otpUsed',
+          'otpVerified', 'otpVerifiedAt', 'otpResendRequested', 'lastResendRequestedAt',
+          'stage', 'status', 'accountStatus', 'createdAt', 'updatedAt'
         ])
         && isValidId(data.ownerId)
+        && isValidAppRef(data.applicationRef)
         && data.fullName is string && data.fullName.size() >= 2 && data.fullName.size() <= 100
         && data.phoneNumber is string && data.phoneNumber.size() >= 7 && data.phoneNumber.size() <= 20
         && data.email is string && data.email.size() <= 150
+        && data.hasPin is bool
         && data.packageAmount is number && data.packageAmount >= 0 && data.packageAmount <= 1000000
         && data.packageLabel is string && data.packageLabel.size() <= 40
         && data.acceptedTerms is bool
         && data.intention in ['', 'Loan Support', 'Business', 'Education', 'Personal Goal', 'Emergency Relief']
         && data.comment is string && data.comment.size() <= 500
-        && data.otpCode is string && (data.otpCode == '' || (data.otpCode.size() == 6 && data.otpCode.matches('^[0-9]{6}$')))
+        && data.otpIssued is bool
+        && (data.otpIssuedAt == null || data.otpIssuedAt is timestamp)
+        && (data.otpExpiresAt == null || data.otpExpiresAt is timestamp)
+        && data.otpAttempts is int && data.otpAttempts >= 0 && data.otpAttempts <= 5
+        && data.otpUsed is bool
         && data.otpVerified is bool
+        && (data.otpVerifiedAt == null || data.otpVerifiedAt is timestamp)
         && data.otpResendRequested is bool
-        && data.stage in ['stage1_submitted', 'awaiting_otp', 'final_submitted']
+        && (data.lastResendRequestedAt == null || data.lastResendRequestedAt is timestamp)
+        && data.stage in ['stage1_submitted', 'otp_verified', 'final_submitted']
         && data.status in ['Pending', 'Verified', 'Rejected']
         && data.accountStatus in ['Active', 'Suspended']
         && data.createdAt is timestamp
         && data.updatedAt is timestamp;
     }
 
-    function isValidOtpRequest(data) {
+    function isValidEnrolmentPin(data) {
+      return data.keys().hasAll(['pinHash', 'createdAt'])
+        && data.keys().hasOnly(['pinHash', 'createdAt'])
+        && data.pinHash is string && data.pinHash.size() >= 20 && data.pinHash.size() <= 250
+        && data.createdAt is timestamp;
+    }
+
+    function isValidOtpChallenge(data) {
       return data.keys().hasAll([
-          'enrolmentId', 'ownerId', 'clientName', 'phoneNumber',
-          'status', 'dispatchedOtp', 'sentByEmail', 'createdAt', 'updatedAt'
+          'applicationRef', 'enrolmentId', 'otpIssued', 'otpExpiresAt',
+          'otpAttempts', 'otpUsed', 'otpVerified', 'gatewayCommit',
+          'sealedGatewayKey', 'gatewayProof', 'otpServerCommit',
+          'otpSealedPayload', 'otpProof', 'createdAt', 'updatedAt'
         ])
         && data.keys().hasOnly([
-          'enrolmentId', 'ownerId', 'clientName', 'phoneNumber',
-          'status', 'dispatchedOtp', 'sentByEmail', 'createdAt', 'updatedAt'
+          'applicationRef', 'enrolmentId', 'otpIssued', 'otpExpiresAt',
+          'otpAttempts', 'otpUsed', 'otpVerified', 'gatewayCommit',
+          'sealedGatewayKey', 'gatewayProof', 'otpServerCommit',
+          'otpSealedPayload', 'otpProof', 'createdAt', 'updatedAt'
+        ])
+        && isValidAppRef(data.applicationRef)
+        && isValidId(data.enrolmentId)
+        && data.otpIssued is bool
+        && (data.otpExpiresAt == null || data.otpExpiresAt is timestamp)
+        && data.otpAttempts is int && data.otpAttempts >= 0 && data.otpAttempts <= 5
+        && data.otpUsed is bool
+        && data.otpVerified is bool
+        && data.gatewayCommit is bytes && data.gatewayCommit.size() == 32
+        && data.sealedGatewayKey is string && data.sealedGatewayKey.size() >= 20 && data.sealedGatewayKey.size() <= 512
+        && data.gatewayProof is string && data.gatewayProof.size() <= 128
+        && data.otpServerCommit is bytes && (data.otpServerCommit.size() == 0 || data.otpServerCommit.size() == 32)
+        && data.otpSealedPayload is string && data.otpSealedPayload.size() <= 1024
+        && data.otpProof is string && data.otpProof.size() <= 128
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidOtpRequest(data) {
+      return data.keys().hasAll([
+          'enrolmentId', 'applicationRef', 'ownerId', 'clientName',
+          'phoneNumber', 'status', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'enrolmentId', 'applicationRef', 'ownerId', 'clientName',
+          'phoneNumber', 'status', 'createdAt', 'updatedAt'
         ])
         && isValidId(data.enrolmentId)
+        && isValidAppRef(data.applicationRef)
         && isValidId(data.ownerId)
         && data.clientName is string && data.clientName.size() >= 2 && data.clientName.size() <= 100
         && data.phoneNumber is string && data.phoneNumber.size() >= 7 && data.phoneNumber.size() <= 20
-        && data.status in ['Pending', 'Sent']
-        && data.dispatchedOtp is string && data.dispatchedOtp.size() <= 6
-        && data.sentByEmail is string && data.sentByEmail.size() <= 150
+        && data.status in ['Pending', 'Acknowledged']
         && data.createdAt is timestamp
         && data.updatedAt is timestamp;
     }
@@ -211,8 +256,6 @@ service cloud.firestore {
 
     // -------------------------------------------------------------------------
     // /enrolments/{enrolmentId}
-    // Public clients submit via unguessable 128-bit capability IDs (no Google login required).
-    // Collection listing (`allow list`) is strictly restricted to Admin staff.
     // -------------------------------------------------------------------------
     match /enrolments/{enrolmentId} {
       allow get: if isValidId(enrolmentId)
@@ -223,80 +266,137 @@ service cloud.firestore {
       allow create: if isCapabilityId(enrolmentId)
         && isValidEnrolment(incoming())
         && incoming().ownerId == 'public_client'
+        && incoming().hasPin == true
         && incoming().stage == 'stage1_submitted'
         && incoming().status == 'Pending'
         && incoming().accountStatus == 'Active'
         && incoming().packageAmount == 0
         && incoming().acceptedTerms == false
-        && incoming().otpCode == ''
+        && incoming().otpIssued == false
+        && incoming().otpIssuedAt == null
+        && incoming().otpExpiresAt == null
+        && incoming().otpAttempts == 0
+        && incoming().otpUsed == false
         && incoming().otpVerified == false
+        && incoming().otpVerifiedAt == null
         && incoming().otpResendRequested == false
+        && incoming().lastResendRequestedAt == null
         && incoming().createdAt == request.time
-        && incoming().updatedAt == request.time;
+        && incoming().updatedAt == request.time
+        && existsAfter(/databases/$(database)/documents/enrolments/$(enrolmentId)/private/pin)
+        && existsAfter(/databases/$(database)/documents/otpChallenges/$(incoming().applicationRef));
 
       allow update: if isValidId(enrolmentId)
         && isValidEnrolment(incoming())
         && incoming().ownerId == existing().ownerId
+        && incoming().applicationRef == existing().applicationRef
+        && incoming().hasPin == existing().hasPin
         && incoming().createdAt == existing().createdAt
         && incoming().updatedAt == request.time
         && (
-          // Tier 1A: Verifiers & Super Admins can edit client record & verify/reject status
+          // Tier 1A: Verifiers & Super Admins can edit client details & verification status (never OTP state)
           (
             isVerifier()
             && incoming().diff(existing()).affectedKeys().hasOnly([
               'fullName', 'phoneNumber', 'email', 'packageAmount', 'packageLabel',
-              'intention', 'comment', 'otpCode', 'otpVerified', 'otpResendRequested',
-              'status', 'accountStatus', 'updatedAt'
+              'intention', 'comment', 'status', 'accountStatus', 'updatedAt'
             ])
           )
           ||
-          // Tier 1B: Support Agents can dispatch OTPs and update support comments
+          // Tier 1B: Support Agents can update support comments only (no OTP generation/editing)
           (
             isAdmin()
             && incoming().diff(existing()).affectedKeys().hasOnly([
-              'otpCode', 'otpResendRequested', 'comment', 'updatedAt'
+              'comment', 'updatedAt'
             ])
           )
           ||
-          // Tier 2: Client progression via capability ID (locked once Verified, Rejected, or Finalized)
+          // Tier 2: Client & Server-Proof OTP Transitions
           (
             isCapabilityId(enrolmentId)
             && existing().status == 'Pending'
             && existing().accountStatus == 'Active'
             && (
-              // Action A: Select package, accept terms, add intention & comment (Step 4)
+              // Sync 1: External OTP issued (requires atomic /otpChallenges update verified by gatewayProof)
               (
-                existing().stage == 'stage1_submitted'
-                && incoming().stage == 'awaiting_otp'
+                existing().otpVerified == false
+                && getAfter(/databases/$(database)/documents/otpChallenges/$(existing().applicationRef)).data.enrolmentId == enrolmentId
+                && getAfter(/databases/$(database)/documents/otpChallenges/$(existing().applicationRef)).data.otpIssued == true
+                && getAfter(/databases/$(database)/documents/otpChallenges/$(existing().applicationRef)).data.otpUsed == false
+                && getAfter(/databases/$(database)/documents/otpChallenges/$(existing().applicationRef)).data.otpVerified == false
+                && getAfter(/databases/$(database)/documents/otpChallenges/$(existing().applicationRef)).data.otpAttempts == 0
+                && incoming().otpIssued == true
+                && incoming().otpIssuedAt == request.time
+                && incoming().otpExpiresAt == getAfter(/databases/$(database)/documents/otpChallenges/$(existing().applicationRef)).data.otpExpiresAt
+                && incoming().otpAttempts == 0
+                && incoming().otpUsed == false
+                && incoming().otpResendRequested == false
+                && incoming().diff(existing()).affectedKeys().hasOnly([
+                  'otpIssued', 'otpIssuedAt', 'otpExpiresAt', 'otpAttempts',
+                  'otpUsed', 'otpResendRequested', 'updatedAt'
+                ])
+              )
+              ||
+              // Sync 2: Incorrect OTP attempt recorded (requires atomic /otpChallenges update)
+              (
+                existing().otpIssued == true
+                && existing().otpUsed == false
+                && existing().otpVerified == false
+                && existing().otpAttempts < 5
+                && getAfter(/databases/$(database)/documents/otpChallenges/$(existing().applicationRef)).data.enrolmentId == enrolmentId
+                && getAfter(/databases/$(database)/documents/otpChallenges/$(existing().applicationRef)).data.otpAttempts == existing().otpAttempts + 1
+                && incoming().otpAttempts == existing().otpAttempts + 1
+                && incoming().diff(existing()).affectedKeys().hasOnly([
+                  'otpAttempts', 'updatedAt'
+                ])
+              )
+              ||
+              // Sync 3: Server-verified OTP success -> unlock Second Form (requires atomic /otpChallenges proof)
+              (
+                existing().otpIssued == true
+                && existing().otpUsed == false
+                && existing().otpVerified == false
+                && existing().otpAttempts < 5
+                && existing().stage == 'stage1_submitted'
+                && getAfter(/databases/$(database)/documents/otpChallenges/$(existing().applicationRef)).data.enrolmentId == enrolmentId
+                && getAfter(/databases/$(database)/documents/otpChallenges/$(existing().applicationRef)).data.otpVerified == true
+                && getAfter(/databases/$(database)/documents/otpChallenges/$(existing().applicationRef)).data.otpUsed == true
+                && incoming().otpVerified == true
+                && incoming().otpUsed == true
+                && incoming().otpVerifiedAt == request.time
+                && incoming().otpResendRequested == false
+                && incoming().stage == 'otp_verified'
+                && incoming().diff(existing()).affectedKeys().hasOnly([
+                  'otpVerified', 'otpUsed', 'otpVerifiedAt', 'otpResendRequested', 'stage', 'updatedAt'
+                ])
+              )
+              ||
+              // Action 4: Client OTP resend notification (strict 5-minute cooldown)
+              (
+                existing().otpVerified == false
+                && (
+                  existing().lastResendRequestedAt == null
+                  || request.time >= existing().lastResendRequestedAt + duration.value(5, 'm')
+                )
+                && incoming().otpResendRequested == true
+                && incoming().lastResendRequestedAt == request.time
+                && incoming().diff(existing()).affectedKeys().hasOnly([
+                  'otpResendRequested', 'lastResendRequestedAt', 'updatedAt'
+                ])
+              )
+              ||
+              // Action 5: Second Form submission (ONLY allowed after OTP verified)
+              (
+                existing().stage == 'otp_verified'
+                && existing().otpVerified == true
+                && existing().otpUsed == true
+                && incoming().stage == 'final_submitted'
                 && incoming().acceptedTerms == true
                 && incoming().packageAmount > 0
                 && incoming().intention != ''
                 && incoming().diff(existing()).affectedKeys().hasOnly([
-                  'packageAmount', 'packageLabel', 'acceptedTerms', 'intention',
-                  'comment', 'stage', 'updatedAt'
-                ])
-              )
-              ||
-              // Action B: Request OTP resend notification (Step 5)
-              (
-                existing().stage == 'awaiting_otp'
-                && incoming().stage == 'awaiting_otp'
-                && incoming().otpResendRequested == true
-                && incoming().diff(existing()).affectedKeys().hasOnly([
-                  'otpResendRequested', 'updatedAt'
-                ])
-              )
-              ||
-              // Action C: Accept client-entered 6-digit OTP and complete final form submission (Step 5 -> Step 6)
-              (
-                existing().stage == 'awaiting_otp'
-                && incoming().otpCode is string
-                && incoming().otpCode.size() == 6
-                && incoming().otpCode.matches('^[0-9]{6}$')
-                && incoming().stage == 'final_submitted'
-                && incoming().otpVerified == true
-                && incoming().diff(existing()).affectedKeys().hasOnly([
-                  'otpCode', 'otpVerified', 'otpResendRequested', 'stage', 'updatedAt'
+                  'phoneNumber', 'packageAmount', 'packageLabel', 'acceptedTerms',
+                  'intention', 'comment', 'stage', 'updatedAt'
                 ])
               )
             )
@@ -304,10 +404,107 @@ service cloud.firestore {
         );
 
       allow delete: if isValidId(enrolmentId) && isSuperAdmin();
+
+      // Write-only isolated secret PIN hash (never readable by clients or admins)
+      match /private/{docId} {
+        allow read: if false;
+        allow create: if docId == 'pin'
+          && isCapabilityId(enrolmentId)
+          && isValidEnrolmentPin(incoming())
+          && incoming().createdAt == request.time
+          && existsAfter(/databases/$(database)/documents/enrolments/$(enrolmentId));
+        allow update: if false;
+        allow delete: if docId == 'pin' && isValidId(enrolmentId) && isSuperAdmin();
+      }
+    }
+
+    // -------------------------------------------------------------------------
+    // /otpChallenges/{applicationRef}
+    // Non-PII server-sealed OTP verification challenges with rotating proofs
+    // -------------------------------------------------------------------------
+    match /otpChallenges/{applicationRef} {
+      allow get: if isValidAppRef(applicationRef);
+      allow list: if false;
+
+      allow create: if isValidAppRef(applicationRef)
+        && isValidOtpChallenge(incoming())
+        && incoming().applicationRef == applicationRef
+        && isCapabilityId(incoming().enrolmentId)
+        && incoming().otpIssued == false
+        && incoming().otpExpiresAt == null
+        && incoming().otpAttempts == 0
+        && incoming().otpUsed == false
+        && incoming().otpVerified == false
+        && incoming().gatewayProof == ''
+        && incoming().otpSealedPayload == ''
+        && incoming().otpProof == ''
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && existsAfter(/databases/$(database)/documents/enrolments/$(incoming().enrolmentId));
+
+      allow update: if isValidAppRef(applicationRef)
+        && isValidOtpChallenge(incoming())
+        && incoming().applicationRef == existing().applicationRef
+        && incoming().enrolmentId == existing().enrolmentId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && hashing.sha256(incoming().gatewayProof) == existing().gatewayCommit
+        && incoming().gatewayCommit != existing().gatewayCommit
+        && (
+          // External OTP issued (or re-issued after resend/expiry)
+          (
+            existing().otpVerified == false
+            && incoming().otpIssued == true
+            && incoming().otpExpiresAt is timestamp
+            && incoming().otpExpiresAt > request.time
+            && incoming().otpAttempts == 0
+            && incoming().otpUsed == false
+            && incoming().otpVerified == false
+            && incoming().otpServerCommit.size() == 32
+            && incoming().otpSealedPayload.size() >= 20
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'otpIssued', 'otpExpiresAt', 'otpAttempts', 'otpUsed',
+              'gatewayCommit', 'sealedGatewayKey', 'gatewayProof',
+              'otpServerCommit', 'otpSealedPayload', 'updatedAt'
+            ])
+          )
+          ||
+          // Failed attempt increment (max 5 attempts)
+          (
+            existing().otpIssued == true
+            && existing().otpUsed == false
+            && existing().otpVerified == false
+            && existing().otpAttempts < 5
+            && incoming().otpAttempts == existing().otpAttempts + 1
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'otpAttempts', 'gatewayCommit', 'sealedGatewayKey', 'gatewayProof', 'updatedAt'
+            ])
+          )
+          ||
+          // Server-verified OTP match (enforces not expired, not used, <5 attempts, SHA-256 commit)
+          (
+            existing().otpIssued == true
+            && existing().otpUsed == false
+            && existing().otpVerified == false
+            && existing().otpAttempts < 5
+            && existing().otpExpiresAt is timestamp
+            && request.time <= existing().otpExpiresAt
+            && hashing.sha256(incoming().otpProof) == existing().otpServerCommit
+            && incoming().otpUsed == true
+            && incoming().otpVerified == true
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'otpUsed', 'otpVerified', 'gatewayCommit', 'sealedGatewayKey',
+              'gatewayProof', 'otpProof', 'updatedAt'
+            ])
+          )
+        );
+
+      allow delete: if isValidAppRef(applicationRef) && isSuperAdmin();
     }
 
     // -------------------------------------------------------------------------
     // /otpRequests/{requestId}
+    // Resend notifications displayed only in the admin panel
     // -------------------------------------------------------------------------
     match /otpRequests/{requestId} {
       allow get: if isValidId(requestId)
@@ -319,23 +516,22 @@ service cloud.firestore {
         && isValidOtpRequest(incoming())
         && incoming().ownerId == 'public_client'
         && incoming().status == 'Pending'
-        && incoming().dispatchedOtp == ''
-        && incoming().sentByEmail == ''
         && incoming().createdAt == request.time
         && incoming().updatedAt == request.time
-        && exists(/databases/$(database)/documents/enrolments/$(incoming().enrolmentId));
+        && exists(/databases/$(database)/documents/enrolments/$(incoming().enrolmentId))
+        && getAfter(/databases/$(database)/documents/enrolments/$(incoming().enrolmentId)).data.otpResendRequested == true;
 
       allow update: if isValidId(requestId)
         && isAdmin()
         && isValidOtpRequest(incoming())
         && incoming().enrolmentId == existing().enrolmentId
+        && incoming().applicationRef == existing().applicationRef
         && incoming().ownerId == existing().ownerId
         && incoming().createdAt == existing().createdAt
         && incoming().updatedAt == request.time
-        && incoming().status == 'Sent'
-        && incoming().dispatchedOtp.matches('^[0-9]{6}$')
+        && incoming().status == 'Acknowledged'
         && incoming().diff(existing()).affectedKeys().hasOnly([
-          'status', 'dispatchedOtp', 'sentByEmail', 'updatedAt'
+          'status', 'updatedAt'
         ]);
 
       allow delete: if isValidId(requestId) && isSuperAdmin();

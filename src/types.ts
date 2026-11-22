@@ -2,7 +2,7 @@ import type { Timestamp } from 'firebase/firestore';
 
 export type StaffRole = 'super_admin' | 'verification_officer' | 'support_agent';
 
-export type EnrolmentStage = 'stage1_submitted' | 'awaiting_otp' | 'final_submitted';
+export type EnrolmentStage = 'stage1_submitted' | 'otp_verified' | 'final_submitted';
 
 export type EnrolmentStatus = 'Pending' | 'Verified' | 'Rejected';
 
@@ -29,17 +29,25 @@ export interface UserProfile {
 export interface Enrolment {
   id: string;
   ownerId: string;
+  applicationRef: string;
   fullName: string;
   phoneNumber: string;
   email: string;
+  hasPin: boolean;
   packageAmount: number;
   packageLabel: string;
   acceptedTerms: boolean;
   intention: IntentionType;
   comment: string;
-  otpCode: string;
+  otpIssued: boolean;
+  otpIssuedAt: Timestamp | null;
+  otpExpiresAt: Timestamp | null;
+  otpAttempts: number;
+  otpUsed: boolean;
   otpVerified: boolean;
+  otpVerifiedAt: Timestamp | null;
   otpResendRequested: boolean;
+  lastResendRequestedAt: Timestamp | null;
   stage: EnrolmentStage;
   status: EnrolmentStatus;
   accountStatus: AccountStatus;
@@ -50,12 +58,11 @@ export interface Enrolment {
 export interface OtpRequest {
   id: string;
   enrolmentId: string;
+  applicationRef: string;
   ownerId: string;
   clientName: string;
   phoneNumber: string;
-  status: 'Pending' | 'Sent';
-  dispatchedOtp: string;
-  sentByEmail: string;
+  status: 'Pending' | 'Acknowledged';
   createdAt: Timestamp | null;
   updatedAt: Timestamp | null;
 }
@@ -86,7 +93,7 @@ export const DEFAULT_SYSTEM_SETTINGS: Omit<SystemSettings, 'updatedAt'> = {
   tier1Amount: 1200,
   tier2Amount: 1800,
   tier3Amount: 2400,
-  otpNoticeText: 'If you do not receive the code within 5 minutes, click Resend Code to notify our admin team.',
+  otpNoticeText: 'If you have not received your external verification code after 5 minutes, click Resend Code to notify the admin team.',
 };
 
 export const BOOTSTRAP_ADMIN_EMAIL = 'joehennry33@gmail.com';

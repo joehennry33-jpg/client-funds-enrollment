@@ -2,7 +2,7 @@
   "entities": {
     "UserProfile": {
       "title": "UserProfile",
-      "description": "Registered client profile information",
+      "description": "Registered staff/admin user profile information",
       "type": "object",
       "properties": {
         "uid": {
@@ -40,13 +40,19 @@
     },
     "Enrolment": {
       "title": "Enrolment",
-      "description": "Client enrolment and verification submission record",
+      "description": "Client enrolment and verification submission record (PIN hash isolated in private subcollection)",
       "type": "object",
       "properties": {
         "ownerId": {
           "type": "string",
           "maxLength": 128,
           "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "applicationRef": {
+          "type": "string",
+          "minLength": 6,
+          "maxLength": 16,
+          "pattern": "^APP-[A-Z0-9]{6}$"
         },
         "fullName": {
           "type": "string",
@@ -61,6 +67,9 @@
         "email": {
           "type": "string",
           "maxLength": 150
+        },
+        "hasPin": {
+          "type": "boolean"
         },
         "packageAmount": {
           "type": "number"
@@ -80,19 +89,40 @@
           "type": "string",
           "maxLength": 500
         },
-        "otpCode": {
+        "otpIssued": {
+          "type": "boolean"
+        },
+        "otpIssuedAt": {
           "type": "string",
-          "maxLength": 6
+          "format": "date-time"
+        },
+        "otpExpiresAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "otpAttempts": {
+          "type": "number"
+        },
+        "otpUsed": {
+          "type": "boolean"
         },
         "otpVerified": {
           "type": "boolean"
         },
+        "otpVerifiedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
         "otpResendRequested": {
           "type": "boolean"
         },
+        "lastResendRequestedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
         "stage": {
           "type": "string",
-          "enum": ["stage1_submitted", "awaiting_otp", "final_submitted"]
+          "enum": ["stage1_submitted", "otp_verified", "final_submitted"]
         },
         "status": {
           "type": "string",
@@ -113,15 +143,19 @@
       },
       "required": [
         "ownerId",
+        "applicationRef",
         "fullName",
         "phoneNumber",
         "email",
+        "hasPin",
         "packageAmount",
         "packageLabel",
         "acceptedTerms",
         "intention",
         "comment",
-        "otpCode",
+        "otpIssued",
+        "otpAttempts",
+        "otpUsed",
         "otpVerified",
         "otpResendRequested",
         "stage",
@@ -131,15 +165,118 @@
         "updatedAt"
       ]
     },
+    "EnrolmentPin": {
+      "title": "EnrolmentPin",
+      "description": "Write-only private salted scrypt hash of client secret PIN (never readable by clients or admins)",
+      "type": "object",
+      "properties": {
+        "pinHash": {
+          "type": "string",
+          "minLength": 20,
+          "maxLength": 250
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["pinHash", "createdAt"]
+    },
+    "OtpChallenge": {
+      "title": "OtpChallenge",
+      "description": "Non-PII server-sealed OTP verification challenge keyed by applicationRef",
+      "type": "object",
+      "properties": {
+        "applicationRef": {
+          "type": "string",
+          "pattern": "^APP-[A-Z0-9]{6}$",
+          "maxLength": 16
+        },
+        "enrolmentId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "otpIssued": {
+          "type": "boolean"
+        },
+        "otpExpiresAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "otpAttempts": {
+          "type": "number"
+        },
+        "otpUsed": {
+          "type": "boolean"
+        },
+        "otpVerified": {
+          "type": "boolean"
+        },
+        "gatewayCommit": {
+          "type": "string",
+          "description": "SHA-256 commitment bytes of rotating server gateway key"
+        },
+        "sealedGatewayKey": {
+          "type": "string",
+          "maxLength": 512
+        },
+        "gatewayProof": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "otpServerCommit": {
+          "type": "string",
+          "description": "SHA-256 commitment bytes of server verification token"
+        },
+        "otpSealedPayload": {
+          "type": "string",
+          "maxLength": 1024
+        },
+        "otpProof": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "applicationRef",
+        "enrolmentId",
+        "otpIssued",
+        "otpAttempts",
+        "otpUsed",
+        "otpVerified",
+        "gatewayCommit",
+        "sealedGatewayKey",
+        "gatewayProof",
+        "otpServerCommit",
+        "otpSealedPayload",
+        "otpProof",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
     "OtpRequest": {
       "title": "OtpRequest",
-      "description": "Client OTP resend notification handled by admin staff",
+      "description": "Client OTP resend notification displayed only in the admin panel",
       "type": "object",
       "properties": {
         "enrolmentId": {
           "type": "string",
           "maxLength": 128,
           "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "applicationRef": {
+          "type": "string",
+          "pattern": "^APP-[A-Z0-9]{6}$",
+          "maxLength": 16
         },
         "ownerId": {
           "type": "string",
@@ -158,15 +295,7 @@
         },
         "status": {
           "type": "string",
-          "enum": ["Pending", "Sent"]
-        },
-        "dispatchedOtp": {
-          "type": "string",
-          "maxLength": 6
-        },
-        "sentByEmail": {
-          "type": "string",
-          "maxLength": 150
+          "enum": ["Pending", "Acknowledged"]
         },
         "createdAt": {
           "type": "string",
@@ -179,12 +308,11 @@
       },
       "required": [
         "enrolmentId",
+        "applicationRef",
         "ownerId",
         "clientName",
         "phoneNumber",
         "status",
-        "dispatchedOtp",
-        "sentByEmail",
         "createdAt",
         "updatedAt"
       ]
@@ -272,15 +400,23 @@
   "firestore": {
     "/users/{userId}": {
       "schema": { "$ref": "#/entities/UserProfile" },
-      "description": "Client user profile documents"
+      "description": "Client/staff user profile documents"
     },
     "/enrolments/{enrolmentId}": {
       "schema": { "$ref": "#/entities/Enrolment" },
-      "description": "Client enrolment submissions across Stage 1, Package & Terms, OTP verification, and Admin review"
+      "description": "Client enrolment submissions across Registration, OTP Verification, Second Form, and Admin review"
+    },
+    "/enrolments/{enrolmentId}/private/{docId}": {
+      "schema": { "$ref": "#/entities/EnrolmentPin" },
+      "description": "Isolated non-readable salted hash of client-created secret PIN"
+    },
+    "/otpChallenges/{applicationRef}": {
+      "schema": { "$ref": "#/entities/OtpChallenge" },
+      "description": "Non-PII server-sealed OTP verification state and rotating cryptographic commitments"
     },
     "/otpRequests/{requestId}": {
       "schema": { "$ref": "#/entities/OtpRequest" },
-      "description": "OTP resend notifications sent by clients and fulfilled by admin staff"
+      "description": "OTP resend notifications sent by clients and displayed only in the admin panel"
     },
     "/staffAccess/{staffEmail}": {
       "schema": { "$ref": "#/entities/StaffMember" },

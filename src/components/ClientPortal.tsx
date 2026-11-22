@@ -3,6 +3,8 @@ import {
   ArrowRight,
   CheckCircle2,
   ClipboardCheck,
+  Eye,
+  EyeOff,
   Lock,
   MessageCircle,
   Phone,
@@ -15,9 +17,7 @@ import {
   doc,
   onSnapshot,
   serverTimestamp,
-  setDoc,
   updateDoc,
-  writeBatch,
 } from 'firebase/firestore';
 import { db, handleFirestoreError, OperationType } from '../firebase';
 import type { Enrolment, IntentionType, SystemSettings } from '../types';
@@ -28,14 +28,15 @@ interface ClientPortalProps {
   onOpenAdminPortal: () => void;
 }
 
-type FlowStep = 'step2_info' | 'step3_received' | 'step4_package' | 'step5_otp' | 'step6_complete';
+type FlowStep = 'step2_info' | 'step3_received' | 'step3_otp' | 'step4_package' | 'step5_complete';
 
-function generateCapabilityId(prefix: string): string {
-  const raw =
-    typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
-      ? crypto.randomUUID().replace(/-/g, '')
-      : `${Date.now().toString(36)}${Math.random().toString(36).slice(2)}${Math.random().toString(36).slice(2)}`;
-  return `${prefix}_${raw}`.slice(0, 48);
+const MAX_OTP_ATTEMPTS = 5;
+const RESEND_COOLDOWN_SECONDS = 300; // 5 minutes
+
+function formatCooldown(seconds: number): string {
+  const m = Math.floor(seconds / 60);
+  const s = seconds % 60;
+  return `${m}m ${s.toString().padStart(2, '0')}s`;
 }
 
 export function ClientPortal({ settings, onOpenAdminPortal }: ClientPortalProps) {
@@ -44,22 +45,26 @@ export function ClientPortal({ settings, onOpenAdminPortal }: ClientPortalProps)
   const [activeEnrolmentId, setActiveEnrolmentId] = useState<string | null>(null);
   const [activeEnrolment, setActiveEnrolment] = useState<Enrolment | null>(null);
 
-  // Step 2 (1st Form)
+  // Step 1 (1st Form: Registration)
   const [fullName, setFullName] = useState('');
   const [phoneNumber, setPhoneNumber] = useState('');
   const [email, setEmail] = useState('');
+  const [secretPin, setSecretPin] = useState('');
+  const [confirmPin, setConfirmPin] = useState('');
+  const [showPin, setShowPin] = useState(false);
 
-  // Step 4 (2nd Form)
+  // Step 3 (OTP Verification)
+  const [otpInput, setOtpInput] = useState('');
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  const [resendNotified, setResendNotified] = useState(false);
+
+  // Step 4 (2nd Form: Final Submission)
   const [selectedAmount, setSelectedAmount] = useState<number>(settings.tier1Amount);
   const [acceptedTerms, setAcceptedTerms] = useState(false);
   const [intention, setIntention] = useState<IntentionType>('Loan Support');
+  const [confirmPhoneNumber, setConfirmPhoneNumber] = useState('');
   const [comment, setComment] = useState('');
   const [showTermsModal, setShowTermsModal] = useState(false);
-
-  // Step 5 (OTP)
-  const [otpInput, setOtpInput] = useState('');
-  const [resendCooldown, setResendCooldown] = useState(0);
-  const [resendNotified, setResendNotified] = useState(false);
 
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
@@ -90,7 +95,7 @@ export function ClientPortal({ settings, onOpenAdminPortal }: ClientPortalProps)
     setSelectedAmount(settings.tier1Amount);
   }, [settings.tier1Amount]);
 
-  // Listen only to the currently active wizard document while in progress (e.g., to receive Admin-dispatched OTP)
+  // Listen only to the currently active wizard document while in progress
   useEffect(() => {
     if (!activeEnrolmentId) {
       setActiveEnrolment(null);
@@ -104,10 +109,12 @@ export function ClientPortal({ settings, onOpenAdminPortal }: ClientPortalProps)
           setActiveEnrolment(null);
           return;
         }
-        setActiveEnrolment({
+        const data = {
           id: snap.id,
           ...(snap.data() as Omit<Enrolment, 'id'>),
-        });
+        };
+        setActiveEnrolment(data);
+        setConfirmPhoneNumber((prev) => prev || data.phoneNumber);
       },
       (error) => {
         handleFirestoreError(error, OperationType.GET, `enrolments/${activeEnrolmentId}`);
@@ -117,19 +124,48 @@ export function ClientPortal({ settings, onOpenAdminPortal }: ClientPortalProps)
     return () => unsub();
   }, [activeEnrolmentId]);
 
-  // Cooldown timer for OTP resend button
+  // Tick every second while in OTP step for live 5-minute resend cooldown & expiry check
   useEffect(() => {
-    if (resendCooldown <= 0) return;
+    if (flowStep !== 'step3_otp') return;
     const timer = setInterval(() => {
-      setResendCooldown((prev) => (prev <= 1 ? 0 : prev - 1));
+      setNowMs(Date.now());
     }, 1000);
     return () => clearInterval(timer);
-  }, [resendCooldown]);
+  }, [flowStep]);
+
+  const resendCooldownSeconds = useMemo(() => {
+    const lastTs = activeEnrolment?.lastResendRequestedAt;
+    if (!lastTs) return 0;
+    try {
+      const lastMs = lastTs.toMillis();
+      const diffSec = Math.ceil((lastMs + RESEND_COOLDOWN_SECONDS * 1000 - nowMs) / 1000);
+      return diffSec > 0 ? diffSec : 0;
+    } catch {
+      return 0;
+    }
+  }, [activeEnrolment?.lastResendRequestedAt, nowMs]);
+
+  const isOtpExpired = useMemo(() => {
+    if (!activeEnrolment?.otpExpiresAt) return false;
+    try {
+      return nowMs > activeEnrolment.otpExpiresAt.toMillis();
+    } catch {
+      return false;
+    }
+  }, [activeEnrolment?.otpExpiresAt, nowMs]);
+
+  const attemptsUsed = activeEnrolment?.otpAttempts ?? 0;
+  const attemptsRemaining = Math.max(0, MAX_OTP_ATTEMPTS - attemptsUsed);
+  const otpIssued = Boolean(activeEnrolment?.otpIssued);
+  const otpUsed = Boolean(activeEnrolment?.otpUsed);
+  const otpVerified = Boolean(activeEnrolment?.otpVerified);
+  const isOtpEntryEnabled =
+    otpIssued && !otpUsed && !otpVerified && attemptsUsed < MAX_OTP_ATTEMPTS && !isOtpExpired;
 
   const whatsappDigits = settings.whatsappNumber.replace(/[^0-9]/g, '');
   const whatsappUrl = `https://wa.me/${whatsappDigits}`;
 
-  const handleStep2Submit = async (e: React.FormEvent) => {
+  const handleStep1Register = async (e: React.FormEvent) => {
     e.preventDefault();
     setFormError(null);
     setFormNotice(null);
@@ -137,49 +173,150 @@ export function ClientPortal({ settings, onOpenAdminPortal }: ClientPortalProps)
     const cleanName = fullName.trim();
     const cleanPhone = phoneNumber.trim();
     const cleanEmail = email.trim();
+    const cleanPin = secretPin.trim();
+    const cleanConfirmPin = confirmPin.trim();
 
     if (cleanName.length < 2) {
       setFormError('Please enter your full name (at least 2 characters).');
       return;
     }
     if (!/^[+0-9\s-]{7,20}$/.test(cleanPhone)) {
-      setFormError('Please enter a valid phone number (e.g. 0711234567 or +254711234567).');
+      setFormError('Please enter a valid mobile number (e.g. 0711234567 or +254711234567).');
       return;
     }
     if (cleanEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
       setFormError('Please enter a valid email address or leave it blank.');
       return;
     }
+    if (!/^[0-9]{4,8}$/.test(cleanPin)) {
+      setFormError('Secret PIN must be 4 to 8 numeric digits.');
+      return;
+    }
+    if (cleanPin !== cleanConfirmPin) {
+      setFormError('Secret PIN and Confirm PIN do not match.');
+      return;
+    }
 
     setSubmitting(true);
-    const newId = generateCapabilityId('enr');
-
     try {
-      await setDoc(doc(db, 'enrolments', newId), {
-        ownerId: 'public_client',
-        fullName: cleanName.slice(0, 100),
-        phoneNumber: cleanPhone.slice(0, 20),
-        email: cleanEmail.slice(0, 150),
-        packageAmount: 0,
-        packageLabel: '',
-        acceptedTerms: false,
-        intention: '',
-        comment: '',
-        otpCode: '',
-        otpVerified: false,
-        otpResendRequested: false,
-        stage: 'stage1_submitted',
-        status: 'Pending',
-        accountStatus: 'Active',
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
+      const response = await fetch('/api/registrations', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          fullName: cleanName,
+          phoneNumber: cleanPhone,
+          email: cleanEmail,
+          pin: cleanPin,
+        }),
       });
+      const data = (await response.json()) as {
+        enrolmentId?: string;
+        applicationRef?: string;
+        error?: string;
+      };
+      if (!response.ok || !data.enrolmentId) {
+        setFormError(data.error || 'Unable to register right now. Please try again.');
+        return;
+      }
 
-      setActiveEnrolmentId(newId);
+      setActiveEnrolmentId(data.enrolmentId);
+      setConfirmPhoneNumber(cleanPhone);
+      setSecretPin('');
+      setConfirmPin('');
       setFlowStep('step3_received');
       setFormError(null);
-    } catch (err) {
-      handleFirestoreError(err, OperationType.CREATE, `enrolments/${newId}`);
+    } catch {
+      setFormError('Network error while submitting registration. Please try again.');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const handleVerifyOtp = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setFormError(null);
+    setFormNotice(null);
+
+    if (!activeEnrolment) {
+      setFormError('No active application record found.');
+      return;
+    }
+
+    if (!activeEnrolment.otpIssued) {
+      setFormError('OTP entry is locked until a code is issued through the external verification process.');
+      return;
+    }
+
+    const trimmed = otpInput.trim();
+    if (!/^[A-Za-z0-9]{4,12}$/.test(trimmed)) {
+      setFormError('Please enter the verification code received from the external source.');
+      return;
+    }
+
+    setSubmitting(true);
+    try {
+      const response = await fetch('/api/otp/verify', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          enrolmentId: activeEnrolment.id,
+          applicationRef: activeEnrolment.applicationRef,
+          otpCode: trimmed,
+        }),
+      });
+      const data = (await response.json()) as {
+        verified?: boolean;
+        error?: string;
+      };
+
+      if (!response.ok || !data.verified) {
+        setFormError(data.error || 'Verification failed. Please check the code and try again.');
+        return;
+      }
+
+      setOtpInput('');
+      setFormError(null);
+      setFormNotice('Phone number verified. Final submission form unlocked.');
+      setFlowStep('step4_package');
+    } catch {
+      setFormError('Unable to verify code right now. Please try again.');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const handleResendOtpRequest = async () => {
+    if (!activeEnrolment || resendCooldownSeconds > 0 || submitting) return;
+    setFormError(null);
+    setFormNotice(null);
+    setSubmitting(true);
+
+    try {
+      const response = await fetch('/api/otp/resend-request', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          enrolmentId: activeEnrolment.id,
+          applicationRef: activeEnrolment.applicationRef,
+        }),
+      });
+      const data = (await response.json()) as {
+        ok?: boolean;
+        error?: string;
+      };
+
+      if (!response.ok || !data.ok) {
+        setFormError(data.error || 'Could not send resend request.');
+        return;
+      }
+
+      setNowMs(Date.now());
+      setResendNotified(true);
+      setFormNotice(
+        'Resend notification recorded in the admin panel. A 5-minute cooldown now applies.'
+      );
+    } catch {
+      setFormError('Network error while notifying the admin panel. Please try again.');
     } finally {
       setSubmitting(false);
     }
@@ -188,9 +325,19 @@ export function ClientPortal({ settings, onOpenAdminPortal }: ClientPortalProps)
   const handleStep4Submit = async (e: React.FormEvent) => {
     e.preventDefault();
     setFormError(null);
+    setFormNotice(null);
 
     if (!activeEnrolment) {
       setFormError('No active enrolment found. Please start from Step 1.');
+      return;
+    }
+    if (!activeEnrolment.otpVerified || activeEnrolment.stage !== 'otp_verified') {
+      setFormError('Please complete OTP verification before submitting the final form.');
+      return;
+    }
+    const cleanPhone = confirmPhoneNumber.trim();
+    if (!/^[+0-9\s-]{7,20}$/.test(cleanPhone)) {
+      setFormError('Please enter a valid mobile number (e.g. 0711234567).');
       return;
     }
     if (!acceptedTerms) {
@@ -206,89 +353,18 @@ export function ClientPortal({ settings, onOpenAdminPortal }: ClientPortalProps)
     try {
       const label = `KES ${selectedAmount.toLocaleString()}`;
       await updateDoc(doc(db, 'enrolments', activeEnrolment.id), {
+        phoneNumber: cleanPhone.slice(0, 20),
         packageAmount: selectedAmount,
         packageLabel: label,
         acceptedTerms: true,
         intention,
         comment: comment.trim().slice(0, 500),
-        stage: 'awaiting_otp',
-        updatedAt: serverTimestamp(),
-      });
-      setOtpInput('');
-      setResendNotified(false);
-      setFlowStep('step5_otp');
-    } catch (err) {
-      handleFirestoreError(err, OperationType.UPDATE, `enrolments/${activeEnrolment.id}`);
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
-  const handleVerifyOtp = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setFormError(null);
-    setFormNotice(null);
-
-    if (!activeEnrolment) {
-      setFormError('No active enrolment record found.');
-      return;
-    }
-
-    const trimmed = otpInput.trim();
-    if (!/^[0-9]{6}$/.test(trimmed)) {
-      setFormError('Please enter a valid 6-digit OTP code.');
-      return;
-    }
-
-    setSubmitting(true);
-    try {
-      await updateDoc(doc(db, 'enrolments', activeEnrolment.id), {
-        otpCode: trimmed,
-        otpVerified: true,
-        otpResendRequested: false,
         stage: 'final_submitted',
         updatedAt: serverTimestamp(),
       });
-      setFlowStep('step6_complete');
+      setFlowStep('step5_complete');
     } catch (err) {
       handleFirestoreError(err, OperationType.UPDATE, `enrolments/${activeEnrolment.id}`);
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
-  const handleResendOtpRequest = async () => {
-    if (!activeEnrolment || resendCooldown > 0) return;
-    setFormError(null);
-    setSubmitting(true);
-
-    const requestId = generateCapabilityId('otp');
-    try {
-      const batch = writeBatch(db);
-      batch.update(doc(db, 'enrolments', activeEnrolment.id), {
-        otpResendRequested: true,
-        updatedAt: serverTimestamp(),
-      });
-      batch.set(doc(db, 'otpRequests', requestId), {
-        enrolmentId: activeEnrolment.id,
-        ownerId: 'public_client',
-        clientName: activeEnrolment.fullName,
-        phoneNumber: activeEnrolment.phoneNumber,
-        status: 'Pending',
-        dispatchedOtp: '',
-        sentByEmail: '',
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
-      });
-      await batch.commit();
-
-      setResendNotified(true);
-      setResendCooldown(15);
-      setFormNotice(
-        'Resend request sent. The admin team has been notified to send a fresh OTP code.'
-      );
-    } catch (err) {
-      handleFirestoreError(err, OperationType.WRITE, `otpRequests/${requestId}`);
     } finally {
       setSubmitting(false);
     }
@@ -300,7 +376,10 @@ export function ClientPortal({ settings, onOpenAdminPortal }: ClientPortalProps)
     setFlowStep('step2_info');
     setFullName('');
     setPhoneNumber('');
+    setConfirmPhoneNumber('');
     setEmail('');
+    setSecretPin('');
+    setConfirmPin('');
     setComment('');
     setAcceptedTerms(false);
     setOtpInput('');
@@ -314,9 +393,9 @@ export function ClientPortal({ settings, onOpenAdminPortal }: ClientPortalProps)
       ? 1
       : flowStep === 'step3_received'
         ? 2
-        : flowStep === 'step4_package'
+        : flowStep === 'step3_otp'
           ? 3
-          : flowStep === 'step5_otp'
+          : flowStep === 'step4_package'
             ? 4
             : 5;
 
@@ -357,7 +436,7 @@ export function ClientPortal({ settings, onOpenAdminPortal }: ClientPortalProps)
             <a
               href="#enrol"
               onClick={() => {
-                if (flowStep === 'step6_complete') handleResetWizard();
+                if (flowStep === 'step5_complete') handleResetWizard();
               }}
               className="px-4 py-2 text-xs font-semibold text-white bg-blue-700 hover:bg-blue-800 rounded-lg transition-colors whitespace-nowrap shrink-0"
             >
@@ -390,7 +469,7 @@ export function ClientPortal({ settings, onOpenAdminPortal }: ClientPortalProps)
                 <a
                   href="#enrol"
                   onClick={() => {
-                    if (flowStep === 'step6_complete') handleResetWizard();
+                    if (flowStep === 'step5_complete') handleResetWizard();
                   }}
                   className="inline-flex items-center gap-2.5 px-6 py-3.5 bg-emerald-600 hover:bg-emerald-700 text-white font-semibold text-sm rounded-lg transition-colors whitespace-nowrap shrink-0"
                 >
@@ -417,8 +496,8 @@ export function ClientPortal({ settings, onOpenAdminPortal }: ClientPortalProps)
                   <div className="text-xs text-slate-500 mt-0.5">Flexible support tiers</div>
                 </div>
                 <div>
-                  <div className="font-display text-2xl font-bold text-slate-900 tabular-nums">6-Digit OTP</div>
-                  <div className="text-xs text-slate-500 mt-0.5">Verified phone protection</div>
+                  <div className="font-display text-2xl font-bold text-slate-900 tabular-nums">PIN + OTP</div>
+                  <div className="text-xs text-slate-500 mt-0.5">Protected verification</div>
                 </div>
               </div>
             </div>
@@ -443,8 +522,8 @@ export function ClientPortal({ settings, onOpenAdminPortal }: ClientPortalProps)
               Built for Everyday Financial Milestones
             </h2>
             <p className="text-slate-600 leading-relaxed">
-              Submit your contact details once, choose the package that matches your plan, and verify
-              your mobile number via OTP for confidential review by our verification desk.
+              Register with your details and secret PIN, verify your mobile number once an external
+              code is issued, and complete your package selection for private admin review.
             </p>
           </div>
 
@@ -501,23 +580,23 @@ export function ClientPortal({ settings, onOpenAdminPortal }: ClientPortalProps)
                 <ol className="space-y-3 text-sm text-slate-300">
                   <li className="flex gap-3">
                     <span className="font-mono text-xs text-emerald-400 pt-0.5 tabular-nums">01</span>
-                    <span>Enter name, phone, and optional email</span>
+                    <span>Register name, mobile, optional email &amp; secret PIN</span>
                   </li>
                   <li className="flex gap-3">
                     <span className="font-mono text-xs text-emerald-400 pt-0.5 tabular-nums">02</span>
-                    <span>Receive immediate admin queue confirmation</span>
+                    <span>Receive application reference &amp; queue confirmation</span>
                   </li>
                   <li className="flex gap-3">
                     <span className="font-mono text-xs text-emerald-400 pt-0.5 tabular-nums">03</span>
-                    <span>Choose package, accept terms, state intention</span>
+                    <span>Verify externally issued OTP code (up to 5 attempts)</span>
                   </li>
                   <li className="flex gap-3">
                     <span className="font-mono text-xs text-emerald-400 pt-0.5 tabular-nums">04</span>
-                    <span>Verify phone number with 6-digit OTP</span>
+                    <span>Select package price, intention &amp; submit final form</span>
                   </li>
                   <li className="flex gap-3">
                     <span className="font-mono text-xs text-emerald-400 pt-0.5 tabular-nums">05</span>
-                    <span>Submit securely to our private admin team</span>
+                    <span>Check back in your account after 10–20 minutes</span>
                   </li>
                 </ol>
               </div>
@@ -532,7 +611,7 @@ export function ClientPortal({ settings, onOpenAdminPortal }: ClientPortalProps)
           </div>
         </section>
 
-        {/* Steps 2 to 6: Interactive Client Enrolment & Verification Flow */}
+        {/* Interactive Client Enrolment & Verification Flow */}
         <section id="enrol" className="bg-white border-y border-slate-200 py-16 lg:py-20">
           <div className="max-w-4xl mx-auto px-6">
             <div className="mb-8">
@@ -548,10 +627,10 @@ export function ClientPortal({ settings, onOpenAdminPortal }: ClientPortalProps)
             {/* Step Progress Rail */}
             <div className="mb-8 grid grid-cols-5 gap-2">
               {[
-                { num: 1, label: 'Client Info' },
+                { num: 1, label: 'Registration' },
                 { num: 2, label: 'Received' },
-                { num: 3, label: 'Package' },
-                { num: 4, label: 'Verify OTP' },
+                { num: 3, label: 'Verify OTP' },
+                { num: 4, label: 'Final Form' },
                 { num: 5, label: 'Submitted' },
               ].map((step) => {
                 const isDone = currentStepNumber > step.num;
@@ -589,14 +668,14 @@ export function ClientPortal({ settings, onOpenAdminPortal }: ClientPortalProps)
 
             {/* Main Wizard Card */}
             <div className="bg-slate-50 border border-slate-200 rounded-xl p-6 sm:p-8">
-              {/* STEP 2: 1st Form - Client Information */}
+              {/* STEP 1: Client Registration (1st Form) */}
               {flowStep === 'step2_info' && (
-                <form onSubmit={handleStep2Submit} className="space-y-5">
+                <form onSubmit={handleStep1Register} className="space-y-5">
                   <div className="flex items-center justify-between border-b border-slate-200 pb-4">
                     <div className="flex items-center gap-2.5">
                       <UserIcon className="w-5 h-5 text-blue-700" />
                       <h3 className="font-display text-lg font-bold text-slate-900">
-                        Client Information (1st Form)
+                        Client Registration (1st Form)
                       </h3>
                     </div>
                     <span className="text-xs text-slate-500 font-mono">Step 1 of 5</span>
@@ -613,14 +692,14 @@ export function ClientPortal({ settings, onOpenAdminPortal }: ClientPortalProps)
                       maxLength={100}
                       value={fullName}
                       onChange={(e) => setFullName(e.target.value)}
-                      placeholder="Enter your name"
+                      placeholder="Enter your full name"
                       className="w-full px-4 py-2.5 bg-white border border-slate-300 rounded-lg text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-600 focus:border-blue-600"
                     />
                   </div>
 
                   <div>
                     <label htmlFor="phoneNumber" className="block text-sm font-medium text-slate-800 mb-1.5">
-                      Phone Number <span className="text-red-600">*</span>
+                      Mobile Number <span className="text-red-600">*</span>
                     </label>
                     <input
                       id="phoneNumber"
@@ -649,18 +728,69 @@ export function ClientPortal({ settings, onOpenAdminPortal }: ClientPortalProps)
                     />
                   </div>
 
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    <div>
+                      <label htmlFor="secretPin" className="block text-sm font-medium text-slate-800 mb-1.5">
+                        Create Secret PIN <span className="text-red-600">*</span>
+                      </label>
+                      <div className="relative">
+                        <input
+                          id="secretPin"
+                          type={showPin ? 'text' : 'password'}
+                          inputMode="numeric"
+                          required
+                          minLength={4}
+                          maxLength={8}
+                          value={secretPin}
+                          onChange={(e) => setSecretPin(e.target.value.replace(/[^0-9]/g, ''))}
+                          placeholder="4–8 digit PIN"
+                          className="w-full pl-4 pr-10 py-2.5 bg-white border border-slate-300 rounded-lg text-sm font-mono tabular-nums text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-600 focus:border-blue-600"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setShowPin((p) => !p)}
+                          aria-label={showPin ? 'Hide secret PIN' : 'Show secret PIN'}
+                          className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-700 cursor-pointer"
+                        >
+                          {showPin ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                        </button>
+                      </div>
+                    </div>
+
+                    <div>
+                      <label htmlFor="confirmPin" className="block text-sm font-medium text-slate-800 mb-1.5">
+                        Confirm Secret PIN <span className="text-red-600">*</span>
+                      </label>
+                      <input
+                        id="confirmPin"
+                        type={showPin ? 'text' : 'password'}
+                        inputMode="numeric"
+                        required
+                        minLength={4}
+                        maxLength={8}
+                        value={confirmPin}
+                        onChange={(e) => setConfirmPin(e.target.value.replace(/[^0-9]/g, ''))}
+                        placeholder="Re-enter PIN"
+                        className="w-full px-4 py-2.5 bg-white border border-slate-300 rounded-lg text-sm font-mono tabular-nums text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-600 focus:border-blue-600"
+                      />
+                    </div>
+                  </div>
+                  <p className="text-xs text-slate-500">
+                    Your secret PIN is securely hashed before storage and is never visible to administrators.
+                  </p>
+
                   <button
                     type="submit"
                     disabled={submitting}
                     className="w-full py-3 px-6 bg-blue-700 hover:bg-blue-800 text-white font-semibold text-sm rounded-lg transition-colors cursor-pointer disabled:opacity-60"
                   >
-                    {submitting ? 'Submitting Details...' : 'Submit Details'}
+                    {submitting ? 'Submitting Registration...' : 'Submit Details'}
                   </button>
                 </form>
               )}
 
-              {/* STEP 3: Form Submitted to Admin Panel */}
-              {flowStep === 'step3_received' && (
+              {/* STEP 2: Form Submitted to Admin Panel */}
+              {flowStep === 'step3_received' && activeEnrolment && (
                 <div className="py-6 text-center max-w-md mx-auto">
                   <div className="w-16 h-16 rounded-full bg-emerald-100 text-emerald-700 flex items-center justify-center mx-auto mb-5">
                     <CheckCircle2 className="w-9 h-9" />
@@ -668,15 +798,20 @@ export function ClientPortal({ settings, onOpenAdminPortal }: ClientPortalProps)
                   <h3 className="font-display text-2xl font-bold text-slate-900 mb-2">
                     Data Received!
                   </h3>
+                  <div className="inline-block px-3.5 py-1.5 rounded-lg bg-white border border-slate-200 text-xs font-mono font-semibold text-slate-800 mb-4">
+                    Application Ref: {activeEnrolment.applicationRef}
+                  </div>
                   <p className="text-sm text-slate-600 leading-relaxed mb-7">
-                    Your information has been successfully submitted to our admin panel. Please proceed
-                    to choose your package and complete verification.
+                    Your registration has been recorded. Please proceed to OTP phone verification to
+                    unlock the final submission form.
                   </p>
                   <button
                     type="button"
                     onClick={() => {
                       setFormError(null);
-                      setFlowStep('step4_package');
+                      setFormNotice(null);
+                      setNowMs(Date.now());
+                      setFlowStep('step3_otp');
                     }}
                     className="px-8 py-3 bg-blue-700 hover:bg-blue-800 text-white font-semibold text-sm rounded-lg transition-colors cursor-pointer"
                   >
@@ -685,19 +820,163 @@ export function ClientPortal({ settings, onOpenAdminPortal }: ClientPortalProps)
                 </div>
               )}
 
-              {/* STEP 4: Select Price, Accept Terms & Add Comment */}
-              {flowStep === 'step4_package' && (
-                <form onSubmit={handleStep4Submit} className="space-y-6">
+              {/* STEP 3: Verify Phone Number with External OTP */}
+              {flowStep === 'step3_otp' && activeEnrolment && (
+                <div className="space-y-6">
                   <div className="flex items-center justify-between border-b border-slate-200 pb-4">
                     <h3 className="font-display text-lg font-bold text-slate-900">
-                      Choose Your Package &amp; Details
+                      Verify Phone Number with OTP
                     </h3>
                     <span className="text-xs text-slate-500 font-mono">Step 3 of 5</span>
                   </div>
 
+                  <div className="grid grid-cols-1 md:grid-cols-12 gap-6 items-start">
+                    {/* Left: External OTP Verification Status Card */}
+                    <div className="md:col-span-5 bg-white border border-slate-200 rounded-xl p-5 space-y-3">
+                      <div className="text-xs font-semibold text-slate-500">
+                        Phone Verification Status
+                      </div>
+                      <div className="text-xs text-slate-600">
+                        Application Ref:{' '}
+                        <span className="font-mono font-semibold text-slate-900">
+                          {activeEnrolment.applicationRef}
+                        </span>
+                      </div>
+                      <div className="text-xs text-slate-600">
+                        Target phone:{' '}
+                        <span className="font-mono font-semibold text-slate-900 tabular-nums">
+                          {activeEnrolment.phoneNumber}
+                        </span>
+                      </div>
+
+                      <div
+                        className={`p-3.5 rounded-lg border text-xs leading-relaxed ${
+                          !otpIssued
+                            ? 'bg-amber-50 border-amber-200 text-amber-900'
+                            : attemptsUsed >= MAX_OTP_ATTEMPTS || isOtpExpired
+                              ? 'bg-red-50 border-red-200 text-red-900'
+                              : 'bg-emerald-50 border-emerald-200 text-emerald-900'
+                        }`}
+                      >
+                        {!otpIssued ? (
+                          <span>
+                            OTP entry is disabled until an OTP has been issued through the external
+                            verification process. You will receive your code externally before
+                            entering it here.
+                          </span>
+                        ) : attemptsUsed >= MAX_OTP_ATTEMPTS ? (
+                          <span>
+                            Maximum of 5 incorrect attempts reached. Please request a new code via
+                            Resend Code.
+                          </span>
+                        ) : isOtpExpired ? (
+                          <span>
+                            This verification code has expired. Please request a new code via Resend
+                            Code.
+                          </span>
+                        ) : (
+                          <span>
+                            An external OTP has been issued for your application. Enter the code you
+                            received externally ({attemptsRemaining} of {MAX_OTP_ATTEMPTS} attempts
+                            remaining).
+                          </span>
+                        )}
+                      </div>
+
+                      <p className="text-xs text-slate-500 leading-relaxed">
+                        {settings.otpNoticeText}
+                      </p>
+                    </div>
+
+                    {/* Right: OTP Input & Resend */}
+                    <form onSubmit={handleVerifyOtp} className="md:col-span-7 space-y-4">
+                      <div>
+                        <label htmlFor="otpCode" className="block text-sm font-medium text-slate-800 mb-1.5">
+                          Enter OTP Code
+                        </label>
+                        <input
+                          id="otpCode"
+                          type="text"
+                          inputMode="numeric"
+                          maxLength={12}
+                          disabled={!isOtpEntryEnabled}
+                          value={otpInput}
+                          onChange={(e) => setOtpInput(e.target.value.replace(/[^A-Za-z0-9]/g, ''))}
+                          placeholder={
+                            otpIssued ? 'Enter externally received code' : 'Locked until external OTP is issued'
+                          }
+                          className="w-full px-4 py-3 bg-white border border-slate-300 rounded-lg text-lg font-mono tracking-[0.18em] tabular-nums text-slate-900 focus:outline-none focus:ring-2 focus:ring-emerald-600 focus:border-emerald-600 disabled:bg-slate-100 disabled:text-slate-400 disabled:cursor-not-allowed"
+                        />
+                      </div>
+
+                      <button
+                        type="submit"
+                        disabled={!isOtpEntryEnabled || submitting || otpInput.trim().length < 4}
+                        className="w-full py-3 px-6 bg-emerald-600 hover:bg-emerald-700 text-white font-semibold text-sm rounded-lg transition-colors cursor-pointer disabled:bg-slate-300 disabled:text-slate-500 disabled:cursor-not-allowed"
+                      >
+                        {submitting ? 'Verifying on Server...' : 'Verify Code'}
+                      </button>
+
+                      <div className="pt-2 border-t border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                        <button
+                          type="button"
+                          disabled={submitting || resendCooldownSeconds > 0 || otpVerified}
+                          onClick={handleResendOtpRequest}
+                          className="inline-flex items-center justify-center gap-2 px-4 py-2.5 bg-white border border-slate-300 hover:bg-slate-100 text-slate-700 text-xs font-semibold rounded-lg transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                        >
+                          <RefreshCw className="w-3.5 h-3.5" />
+                          {resendCooldownSeconds > 0
+                            ? `Resend Cooldown (${formatCooldown(resendCooldownSeconds)})`
+                            : 'Resend Code'}
+                        </button>
+                        <span className="text-xs text-slate-500">
+                          {resendCooldownSeconds > 0
+                            ? 'Admin panel notified · 5-minute cooldown active'
+                            : resendNotified || activeEnrolment.otpResendRequested
+                              ? 'Admin panel notified'
+                              : '5-minute cooldown applies per request'}
+                        </span>
+                      </div>
+                    </form>
+                  </div>
+                </div>
+              )}
+
+              {/* STEP 4: Final Submission Form (2nd Form - Unlocked ONLY after server-verified OTP) */}
+              {flowStep === 'step4_package' && activeEnrolment && (
+                <form onSubmit={handleStep4Submit} className="space-y-6">
+                  <div className="flex items-center justify-between border-b border-slate-200 pb-4">
+                    <div>
+                      <h3 className="font-display text-lg font-bold text-slate-900">
+                        Final Enrolment Form (2nd Form)
+                      </h3>
+                      <p className="text-xs text-slate-500 mt-0.5 font-mono">
+                        Application Ref: {activeEnrolment.applicationRef}
+                      </p>
+                    </div>
+                    <span className="text-xs text-slate-500 font-mono">Step 4 of 5</span>
+                  </div>
+
+                  {/* Verification Status */}
+                  <div className="p-4 rounded-lg bg-emerald-50 border border-emerald-200 flex items-center justify-between gap-4">
+                    <div>
+                      <div className="text-xs font-semibold text-emerald-900">
+                        Verification Status
+                      </div>
+                      <div className="text-xs text-emerald-800 mt-0.5">
+                        Phone OTP verified on server · Final form unlocked
+                      </div>
+                    </div>
+                    <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-md bg-emerald-600 text-white text-xs font-semibold shrink-0">
+                      <CheckCircle2 className="w-3.5 h-3.5" />
+                      OTP Verified
+                    </span>
+                  </div>
+
+                  {/* Selected Price */}
                   <div>
                     <label className="block text-sm font-medium text-slate-800 mb-2.5">
-                      Choose Your Package
+                      Selected Price (Choose Your Package)
                     </label>
                     <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                       {packageOptions.map((pkg) => {
@@ -723,6 +1002,59 @@ export function ClientPortal({ settings, onOpenAdminPortal }: ClientPortalProps)
                     </div>
                   </div>
 
+                  {/* Mobile Number */}
+                  <div>
+                    <label htmlFor="confirmPhone" className="block text-sm font-medium text-slate-800 mb-1.5">
+                      Mobile Number <span className="text-red-600">*</span>
+                    </label>
+                    <input
+                      id="confirmPhone"
+                      type="tel"
+                      required
+                      maxLength={20}
+                      value={confirmPhoneNumber}
+                      onChange={(e) => setConfirmPhoneNumber(e.target.value)}
+                      placeholder="Confirm mobile number"
+                      className="w-full px-4 py-2.5 bg-white border border-slate-300 rounded-lg text-sm font-mono tabular-nums text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-600"
+                    />
+                  </div>
+
+                  {/* Client Intention */}
+                  <div>
+                    <label htmlFor="intentionSelect" className="block text-sm font-medium text-slate-800 mb-1.5">
+                      Client Intention
+                    </label>
+                    <select
+                      id="intentionSelect"
+                      value={intention}
+                      onChange={(e) => setIntention(e.target.value as IntentionType)}
+                      className="w-full px-4 py-2.5 bg-white border border-slate-300 rounded-lg text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-600"
+                    >
+                      <option value="Loan Support">Loan Support</option>
+                      <option value="Business">Business</option>
+                      <option value="Education">Education</option>
+                      <option value="Personal Goal">Personal Goal</option>
+                      <option value="Emergency Relief">Emergency Relief</option>
+                    </select>
+                  </div>
+
+                  {/* Additional Comment */}
+                  <div>
+                    <label htmlFor="commentBox" className="block text-sm font-medium text-slate-800 mb-1.5">
+                      Additional Comment
+                    </label>
+                    <textarea
+                      id="commentBox"
+                      rows={3}
+                      maxLength={500}
+                      value={comment}
+                      onChange={(e) => setComment(e.target.value)}
+                      placeholder="Any additional information..."
+                      className="w-full px-4 py-2.5 bg-white border border-slate-300 rounded-lg text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-600"
+                    />
+                  </div>
+
+                  {/* Terms */}
                   <div className="flex items-start gap-3">
                     <input
                       id="termsCheckbox"
@@ -743,133 +1075,19 @@ export function ClientPortal({ settings, onOpenAdminPortal }: ClientPortalProps)
                     </label>
                   </div>
 
-                  <div>
-                    <label htmlFor="intentionSelect" className="block text-sm font-medium text-slate-800 mb-1.5">
-                      Your Intention
-                    </label>
-                    <select
-                      id="intentionSelect"
-                      value={intention}
-                      onChange={(e) => setIntention(e.target.value as IntentionType)}
-                      className="w-full px-4 py-2.5 bg-white border border-slate-300 rounded-lg text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-600"
-                    >
-                      <option value="Loan Support">Loan Support</option>
-                      <option value="Business">Business</option>
-                      <option value="Education">Education</option>
-                      <option value="Personal Goal">Personal Goal</option>
-                      <option value="Emergency Relief">Emergency Relief</option>
-                    </select>
-                  </div>
-
-                  <div>
-                    <label htmlFor="commentBox" className="block text-sm font-medium text-slate-800 mb-1.5">
-                      Your Comment
-                    </label>
-                    <textarea
-                      id="commentBox"
-                      rows={3}
-                      maxLength={500}
-                      value={comment}
-                      onChange={(e) => setComment(e.target.value)}
-                      placeholder="Any additional information..."
-                      className="w-full px-4 py-2.5 bg-white border border-slate-300 rounded-lg text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-600"
-                    />
-                  </div>
-
                   <button
                     type="submit"
                     disabled={submitting}
                     className="w-full inline-flex items-center justify-center gap-2 py-3 px-6 bg-blue-700 hover:bg-blue-800 text-white font-semibold text-sm rounded-lg transition-colors cursor-pointer disabled:opacity-60"
                   >
-                    {submitting ? 'Saving Selection...' : 'Proceed'}
+                    {submitting ? 'Submitting Final Form...' : 'Submit Final Form'}
                     <ArrowRight className="w-4 h-4" />
                   </button>
                 </form>
               )}
 
-              {/* STEP 5: Verify Phone Number with OTP */}
-              {flowStep === 'step5_otp' && activeEnrolment && (
-                <div className="space-y-6">
-                  <div className="flex items-center justify-between border-b border-slate-200 pb-4">
-                    <h3 className="font-display text-lg font-bold text-slate-900">
-                      Verify Phone Number with OTP
-                    </h3>
-                    <span className="text-xs text-slate-500 font-mono">Step 4 of 5</span>
-                  </div>
-
-                  <div className="grid grid-cols-1 md:grid-cols-12 gap-6 items-start">
-                    {/* Left: SMS Verification Status Card */}
-                    <div className="md:col-span-5 bg-white border border-slate-200 rounded-xl p-5">
-                      <div className="text-xs font-semibold text-slate-500 mb-3">
-                        Phone Verification Status
-                      </div>
-                      <p className="text-xs text-slate-600 mb-3">
-                        Target phone:{' '}
-                        <span className="font-mono font-semibold text-slate-900 tabular-nums">
-                          {activeEnrolment.phoneNumber}
-                        </span>
-                      </p>
-                      <div className="p-3.5 rounded-lg bg-slate-50 border border-slate-200 text-xs text-slate-700 leading-relaxed">
-                        Our admin team sends your 6-digit verification code externally to your phone.
-                        Enter the code you received from that external message to complete your
-                        enrolment.
-                      </div>
-                      <p className="text-xs text-slate-500 mt-4 leading-relaxed">
-                        {settings.otpNoticeText}
-                      </p>
-                    </div>
-
-                    {/* Right: OTP Input & Resend */}
-                    <form onSubmit={handleVerifyOtp} className="md:col-span-7 space-y-4">
-                      <div>
-                        <label htmlFor="otpCode" className="block text-sm font-medium text-slate-800 mb-1.5">
-                          Enter OTP Code
-                        </label>
-                        <input
-                          id="otpCode"
-                          type="text"
-                          inputMode="numeric"
-                          maxLength={6}
-                          value={otpInput}
-                          onChange={(e) => setOtpInput(e.target.value.replace(/[^0-9]/g, ''))}
-                          placeholder="Enter 6-digit code"
-                          className="w-full px-4 py-3 bg-white border border-slate-300 rounded-lg text-lg font-mono tracking-[0.2em] tabular-nums text-slate-900 focus:outline-none focus:ring-2 focus:ring-emerald-600 focus:border-emerald-600"
-                        />
-                      </div>
-
-                      <button
-                        type="submit"
-                        disabled={submitting}
-                        className="w-full py-3 px-6 bg-emerald-600 hover:bg-emerald-700 text-white font-semibold text-sm rounded-lg transition-colors cursor-pointer disabled:opacity-60"
-                      >
-                        {submitting ? 'Verifying...' : 'Verify Code'}
-                      </button>
-
-                      <div className="pt-2 border-t border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                        <button
-                          type="button"
-                          disabled={submitting || resendCooldown > 0}
-                          onClick={handleResendOtpRequest}
-                          className="inline-flex items-center justify-center gap-2 px-4 py-2.5 bg-white border border-slate-300 hover:bg-slate-100 text-slate-700 text-xs font-semibold rounded-lg transition-colors cursor-pointer disabled:opacity-50"
-                        >
-                          <RefreshCw className="w-3.5 h-3.5" />
-                          {resendCooldown > 0
-                            ? `Resend Requested (${resendCooldown}s)`
-                            : 'Resend Code (Notify Admin)'}
-                        </button>
-                        <span className="text-xs text-slate-500">
-                          {resendNotified || activeEnrolment.otpResendRequested
-                            ? 'Admin notified for OTP dispatch'
-                            : 'Standard wait: 5 min'}
-                        </span>
-                      </div>
-                    </form>
-                  </div>
-                </div>
-              )}
-
-              {/* STEP 6: Submit Final Form (2nd Form) */}
-              {flowStep === 'step6_complete' && (
+              {/* STEP 5: Final Submission Confirmation */}
+              {flowStep === 'step5_complete' && (
                 <div className="py-6 text-center max-w-md mx-auto">
                   <div className="w-16 h-16 rounded-full bg-emerald-100 text-emerald-700 flex items-center justify-center mx-auto mb-5">
                     <ClipboardCheck className="w-9 h-9" />
@@ -877,9 +1095,14 @@ export function ClientPortal({ settings, onOpenAdminPortal }: ClientPortalProps)
                   <h3 className="font-display text-2xl font-bold text-slate-900 mb-2">
                     Details Submitted!
                   </h3>
+                  {activeEnrolment?.applicationRef && (
+                    <div className="inline-block px-3.5 py-1.5 rounded-lg bg-white border border-slate-200 text-xs font-mono font-semibold text-slate-800 mb-4">
+                      Application Ref: {activeEnrolment.applicationRef}
+                    </div>
+                  )}
                   <p className="text-sm text-slate-600 leading-relaxed mb-7">
-                    Your data has been recorded. Please check back in your account after 10–20 minutes
-                    or contact our support team on WhatsApp if you need assistance.
+                    Your data has been recorded. Please check your website account after 10–20
+                    minutes or contact our support team on WhatsApp if you need assistance.
                   </p>
                   <button
                     type="button"
@@ -894,7 +1117,7 @@ export function ClientPortal({ settings, onOpenAdminPortal }: ClientPortalProps)
           </div>
         </section>
 
-        {/* Step 7: Contact Us via WhatsApp */}
+        {/* Contact Us via WhatsApp */}
         <section id="contact" className="max-w-7xl mx-auto px-6 py-16">
           <div className="bg-emerald-950 text-white rounded-2xl p-8 lg:p-12 flex flex-col lg:flex-row lg:items-center justify-between gap-8">
             <div className="max-w-xl">
@@ -906,7 +1129,7 @@ export function ClientPortal({ settings, onOpenAdminPortal }: ClientPortalProps)
                 Need Help? Chat with us on WhatsApp
               </h2>
               <p className="text-emerald-100/80 text-sm leading-relaxed">
-                Have questions about your package tier, OTP code delivery, or account verification?
+                Have questions about your package tier, OTP verification, or account review?
                 Reach our support desk directly on WhatsApp or email {settings.supportEmail}.
               </p>
             </div>
@@ -1028,16 +1251,19 @@ export function ClientPortal({ settings, onOpenAdminPortal }: ClientPortalProps)
             </div>
             <div className="space-y-3 text-sm text-slate-600 leading-relaxed max-h-72 overflow-y-auto pr-1">
               <p>
-                1. All personal details provided during client enrolment (full name, phone number, and
-                optional email) are used solely to verify eligibility and process your chosen package.
+                1. All personal details provided during client registration (full name, mobile
+                number, and optional email) are used solely to verify eligibility and process your
+                chosen package.
               </p>
               <p>
-                2. Phone verification via 6-digit OTP is mandatory before final submission. If your
-                code is delayed, use the Resend Code button to notify an administrator.
+                2. Your secret PIN is securely hashed and never exposed to staff or administrators.
+                Phone verification using an externally issued OTP is required before final
+                submission.
               </p>
               <p>
-                3. Verification reviews typically complete within 10–20 minutes after final submission.
-                Please contact WhatsApp support at {settings.whatsappNumber} if you need help.
+                3. Verification reviews typically complete within 10–20 minutes after final
+                submission. Contact WhatsApp support at {settings.whatsappNumber} if you need
+                assistance.
               </p>
             </div>
             <div className="mt-6 flex justify-end gap-3">
