@@ -595,7 +595,7 @@ export function createApiApp() {
 
       if (!readBool(challengeDoc.fields, 'otpIssued')) {
         res.status(400).json({
-          error: 'OTP entry is disabled until a verification code has been issued through the external verification process.',
+          error: 'No verification code has been issued yet. Please click Resend Code to notify the admin.',
         });
         return;
       }

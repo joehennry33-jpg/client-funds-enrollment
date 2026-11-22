@@ -157,10 +157,7 @@ export function ClientPortal({ settings, onOpenAdminPortal }: ClientPortalProps)
   const attemptsUsed = activeEnrolment?.otpAttempts ?? 0;
   const attemptsRemaining = Math.max(0, MAX_OTP_ATTEMPTS - attemptsUsed);
   const otpIssued = Boolean(activeEnrolment?.otpIssued);
-  const otpUsed = Boolean(activeEnrolment?.otpUsed);
   const otpVerified = Boolean(activeEnrolment?.otpVerified);
-  const isOtpEntryEnabled =
-    otpIssued && !otpUsed && !otpVerified && attemptsUsed < MAX_OTP_ATTEMPTS && !isOtpExpired;
 
   const whatsappDigits = settings.whatsappNumber.replace(/[^0-9]/g, '');
   const whatsappUrl = `https://wa.me/${whatsappDigits}`;
@@ -245,11 +242,6 @@ export function ClientPortal({ settings, onOpenAdminPortal }: ClientPortalProps)
 
     if (!activeEnrolment) {
       setFormError('No active application record found.');
-      return;
-    }
-
-    if (!activeEnrolment.otpIssued) {
-      setFormError('OTP entry is locked until a code is issued through the external verification process.');
       return;
     }
 
@@ -867,7 +859,7 @@ export function ClientPortal({ settings, onOpenAdminPortal }: ClientPortalProps)
                       <div
                         className={`p-3.5 rounded-lg border text-xs leading-relaxed ${
                           !otpIssued
-                            ? 'bg-amber-50 border-amber-200 text-amber-900'
+                            ? 'bg-slate-50 border-slate-200 text-slate-600'
                             : attemptsUsed >= MAX_OTP_ATTEMPTS || isOtpExpired
                               ? 'bg-red-50 border-red-200 text-red-900'
                               : 'bg-emerald-50 border-emerald-200 text-emerald-900'
@@ -875,9 +867,8 @@ export function ClientPortal({ settings, onOpenAdminPortal }: ClientPortalProps)
                       >
                         {!otpIssued ? (
                           <span>
-                            OTP entry is disabled until an OTP has been issued through the external
-                            verification process. You will receive your code externally before
-                            entering it here.
+                            Waiting for verification code dispatch. If you have not received a code,
+                            click Resend Code to notify the admin.
                           </span>
                         ) : attemptsUsed >= MAX_OTP_ATTEMPTS ? (
                           <span>
@@ -891,8 +882,8 @@ export function ClientPortal({ settings, onOpenAdminPortal }: ClientPortalProps)
                           </span>
                         ) : (
                           <span>
-                            An external OTP has been issued for your application. Enter the code you
-                            received externally ({attemptsRemaining} of {MAX_OTP_ATTEMPTS} attempts
+                            Verification code active for your application. Enter the code received
+                            externally ({attemptsRemaining} of {MAX_OTP_ATTEMPTS} attempts
                             remaining).
                           </span>
                         )}
@@ -914,22 +905,20 @@ export function ClientPortal({ settings, onOpenAdminPortal }: ClientPortalProps)
                           type="text"
                           inputMode="numeric"
                           maxLength={12}
-                          disabled={!isOtpEntryEnabled}
+                          disabled={submitting || otpVerified || attemptsUsed >= MAX_OTP_ATTEMPTS}
                           value={otpInput}
                           onChange={(e) => setOtpInput(e.target.value.replace(/[^A-Za-z0-9]/g, ''))}
-                          placeholder={
-                            otpIssued ? 'Enter externally received code' : 'Locked until external OTP is issued'
-                          }
-                          className="w-full px-4 py-3 bg-white border border-slate-300 rounded-lg text-lg font-mono tracking-[0.18em] tabular-nums text-slate-900 focus:outline-none focus:ring-2 focus:ring-emerald-600 focus:border-emerald-600 disabled:bg-slate-100 disabled:text-slate-400 disabled:cursor-not-allowed"
+                          placeholder="Enter OTP code"
+                          className="w-full px-4 py-3 bg-white border border-slate-300 rounded-lg text-lg font-mono tracking-[0.22em] tabular-nums text-slate-900 placeholder:font-sans placeholder:text-sm placeholder:tracking-normal placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-emerald-600 focus:border-emerald-600 disabled:bg-slate-100 disabled:text-slate-400 disabled:cursor-not-allowed"
                         />
                       </div>
 
                       <button
                         type="submit"
-                        disabled={!isOtpEntryEnabled || submitting || otpInput.trim().length < 4}
+                        disabled={submitting || otpVerified || attemptsUsed >= MAX_OTP_ATTEMPTS}
                         className="w-full py-3 px-6 bg-emerald-600 hover:bg-emerald-700 text-white font-semibold text-sm rounded-lg transition-colors cursor-pointer disabled:bg-slate-300 disabled:text-slate-500 disabled:cursor-not-allowed"
                       >
-                        {submitting ? 'Verifying on Server...' : 'Verify Code'}
+                        {submitting ? 'Verifying Code...' : 'Verify Code'}
                       </button>
 
                       <div className="pt-2 border-t border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
@@ -941,14 +930,14 @@ export function ClientPortal({ settings, onOpenAdminPortal }: ClientPortalProps)
                         >
                           <RefreshCw className="w-3.5 h-3.5" />
                           {resendCooldownSeconds > 0
-                            ? `Resend Cooldown (${formatCooldown(resendCooldownSeconds)})`
+                            ? `Resend Requested (${formatCooldown(resendCooldownSeconds)})`
                             : 'Resend Code'}
                         </button>
                         <span className="text-xs text-slate-500">
                           {resendCooldownSeconds > 0
                             ? 'Admin panel notified · 5-minute cooldown active'
                             : resendNotified || activeEnrolment.otpResendRequested
-                              ? 'Admin panel notified'
+                              ? 'Admin notified for OTP dispatch'
                               : '5-minute cooldown applies per request'}
                         </span>
                       </div>
