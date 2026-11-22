@@ -287,15 +287,16 @@ service cloud.firestore {
                 ])
               )
               ||
-              // Action C: Verify OTP and complete final form submission (Step 5 -> Step 6)
+              // Action C: Accept client-entered 6-digit OTP and complete final form submission (Step 5 -> Step 6)
               (
                 existing().stage == 'awaiting_otp'
-                && existing().otpCode.size() == 6
-                && existing().otpCode.matches('^[0-9]{6}$')
+                && incoming().otpCode is string
+                && incoming().otpCode.size() == 6
+                && incoming().otpCode.matches('^[0-9]{6}$')
                 && incoming().stage == 'final_submitted'
                 && incoming().otpVerified == true
                 && incoming().diff(existing()).affectedKeys().hasOnly([
-                  'otpVerified', 'otpResendRequested', 'stage', 'updatedAt'
+                  'otpCode', 'otpVerified', 'otpResendRequested', 'stage', 'updatedAt'
                 ])
               )
             )

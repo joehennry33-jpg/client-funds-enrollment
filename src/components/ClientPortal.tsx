@@ -240,23 +240,10 @@ export function ClientPortal({ settings, onOpenAdminPortal }: ClientPortalProps)
       return;
     }
 
-    if (!activeEnrolment.otpCode) {
-      setFormError(
-        'No verification code has been issued yet. Please click Resend Code to notify the admin.'
-      );
-      return;
-    }
-
-    if (trimmed !== activeEnrolment.otpCode) {
-      setFormError(
-        'The OTP code you entered does not match. Please check your verification message or click Resend Code to notify the admin.'
-      );
-      return;
-    }
-
     setSubmitting(true);
     try {
       await updateDoc(doc(db, 'enrolments', activeEnrolment.id), {
+        otpCode: trimmed,
         otpVerified: true,
         otpResendRequested: false,
         stage: 'final_submitted',
@@ -823,9 +810,9 @@ export function ClientPortal({ settings, onOpenAdminPortal }: ClientPortalProps)
                         </span>
                       </p>
                       <div className="p-3.5 rounded-lg bg-slate-50 border border-slate-200 text-xs text-slate-700 leading-relaxed">
-                        {activeEnrolment.otpCode
-                          ? 'A 6-digit verification code has been sent by our admin team. Enter it to complete your enrolment.'
-                          : 'Waiting for verification code dispatch. If you have not received a code, click Resend Code to notify the admin.'}
+                        Our admin team sends your 6-digit verification code externally to your phone.
+                        Enter the code you received from that external message to complete your
+                        enrolment.
                       </div>
                       <p className="text-xs text-slate-500 mt-4 leading-relaxed">
                         {settings.otpNoticeText}
